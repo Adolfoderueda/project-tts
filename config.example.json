@@ -1,0 +1,10 @@
+{
+  "databasePath": "./project-voice-bridge.sqlite",
+  "projects": [
+    {
+      "id": "example-project",
+      "name": "Example Project",
+      "baseURL": "http://127.0.0.1:4096"
+    }
+  ]
+}
