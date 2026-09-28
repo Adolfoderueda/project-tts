@@ -4,7 +4,7 @@
     {
       "id": "example-project",
       "name": "Example Project",
-      "baseURL": "http://127.0.0.1:4096"
+      "directory": "C:\\Users\\you\\Projects\\example-project"
     }
   ]
 }

@@ -1,100 +1,94 @@
-import type { Event as OpenCodeEvent } from '@opencode-ai/sdk';
 import { describe, expect, test } from 'vitest';
 import { mapOpenCodeEvent, type ProjectConfig } from '../src/events.js';
 
-const project: ProjectConfig = {
-  id: 'project-alpha',
-  name: 'Project Alpha',
-  baseURL: 'http://127.0.0.1:4096',
-};
+const projects: ProjectConfig[] = [
+  { id: 'project-alpha', name: 'Project Alpha', directory: 'C:\\Projects\\alpha' },
+  { id: 'project-beta', name: 'Project Beta', directory: 'D:\\Work\\beta' },
+];
 
 const occurredAt = new Date('2026-09-27T12:34:56.789Z');
 
-function expectUuid(value: string): void {
-  expect(value).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u);
-}
-
 describe('mapOpenCodeEvent', () => {
   test.each([
-    [
-      'session.idle',
-      { type: 'session.idle', properties: { sessionID: 'session-1' } } satisfies Extract<OpenCodeEvent, { type: 'session.idle' }>,
-      'turn-ended',
-      'OpenCode turn finished',
-    ],
-    [
-      'permission.updated',
-      {
-        type: 'permission.updated',
-        properties: {
-          id: 'permission-1',
-          type: 'tool',
-          sessionID: 'session-2',
-          messageID: 'message-1',
-          title: 'Approve tool use',
-          metadata: {},
-          time: { created: 0 },
-        },
-      } satisfies Extract<OpenCodeEvent, { type: 'permission.updated' }>,
-      'waiting-for-input',
-      'OpenCode is waiting for input',
-    ],
-    [
-      'session.error',
-      { type: 'session.error', properties: { sessionID: 'session-3' } } satisfies Extract<OpenCodeEvent, { type: 'session.error' }>,
-      'error',
-      'OpenCode session error',
-    ],
-  ] as const)('maps %s to a captured event', (_type, event, kind, summary) => {
-    const mapped = mapOpenCodeEvent(project, event, occurredAt);
+    ['session.idle', 'session-1', 'turn-ended', 'OpenCode turn finished'],
+    ['permission.asked', 'session-2', 'waiting-for-input', 'OpenCode is waiting for input'],
+    ['permission.v2.asked', 'session-3', 'waiting-for-input', 'OpenCode is waiting for input'],
+    ['session.error', 'session-4', 'error', 'OpenCode session error'],
+  ] as const)('maps V2 %s to a project-scoped captured event', (type, sessionID, kind, summary) => {
+    const event = {
+      id: `source-${type}`,
+      type,
+      data: { sessionID },
+      location: { directory: 'C:/Projects/alpha/' },
+    };
 
-    expect(mapped).toMatchObject({
-      projectId: project.id,
-      projectName: project.name,
-      sessionId: event.properties.sessionID,
+    const mapped = mapOpenCodeEvent(projects, event, occurredAt);
+
+    expect(mapped).toEqual({
+      id: JSON.stringify(['project-alpha', `source-${type}`]),
+      projectId: 'project-alpha',
+      projectName: 'Project Alpha',
+      sessionId: sessionID,
       kind,
       occurredAt: occurredAt.toISOString(),
       summary,
-      rawEventType: event.type,
+      rawEventType: type,
     });
-    expectUuid(mapped?.id ?? '');
   });
 
-  test('uses a stable project-scoped ID when the source event ID is present', () => {
-    const event = { type: 'session.idle', properties: { sessionID: 'session-1' } } satisfies Extract<OpenCodeEvent, { type: 'session.idle' }>;
+  test('routes events from multiple configured directories to the matching project', () => {
+    const event = {
+      id: 'source-beta',
+      type: 'session.idle',
+      data: { sessionID: 'session-beta' },
+      location: { directory: 'D:/work/BETA' },
+    };
 
-    const first = mapOpenCodeEvent(project, event, occurredAt, 'source-event-1');
-    const replay = mapOpenCodeEvent(project, event, occurredAt, 'source-event-1');
+    expect(mapOpenCodeEvent(projects, event, occurredAt)).toMatchObject({
+      id: JSON.stringify(['project-beta', 'source-beta']),
+      projectId: 'project-beta',
+      projectName: 'Project Beta',
+      sessionId: 'session-beta',
+    });
+  });
+
+  test('uses_project_scoped_v2_event_ids_and_ignores_missing_ids', () => {
+    const event = {
+      id: 'source-event-1',
+      type: 'session.idle',
+      data: { sessionID: 'session-1' },
+      location: { directory: 'C:\\Projects\\alpha' },
+    };
+
+    const first = mapOpenCodeEvent(projects, event, occurredAt);
+    const replay = mapOpenCodeEvent(projects, event, occurredAt);
+    const missingId = mapOpenCodeEvent(projects, { ...event, id: '' }, occurredAt);
 
     expect(first?.id).toBe(JSON.stringify(['project-alpha', 'source-event-1']));
     expect(replay?.id).toBe(first?.id);
+    expect(missingId).toBeNull();
   });
 
-  test('keeps source event IDs distinct across projects', () => {
-    const event = { type: 'session.idle', properties: { sessionID: 'session-1' } } satisfies Extract<OpenCodeEvent, { type: 'session.idle' }>;
-    const otherProject: ProjectConfig = { ...project, id: 'project-beta', name: 'Project Beta' };
+  test('normalizes_windows_project_directories_for_exact_matching', () => {
+    const event = {
+      id: 'source-event-1',
+      type: 'session.idle',
+      data: { sessionID: 'session-1' },
+      location: { directory: 'c:/projects/ALPHA///' },
+    };
 
-    const first = mapOpenCodeEvent(project, event, occurredAt, 'source-event-1');
-    const second = mapOpenCodeEvent(otherProject, event, occurredAt, 'source-event-1');
-
-    expect(first?.id).toBe(JSON.stringify(['project-alpha', 'source-event-1']));
-    expect(second?.id).toBe(JSON.stringify(['project-beta', 'source-event-1']));
-    expect(second?.id).not.toBe(first?.id);
-  });
-
-  test('retains a UUID ID when the source event ID is absent', () => {
-    const event = { type: 'session.idle', properties: { sessionID: 'session-1' } } satisfies Extract<OpenCodeEvent, { type: 'session.idle' }>;
-
-    const mapped = mapOpenCodeEvent(project, event, occurredAt);
-
-    expectUuid(mapped?.id ?? '');
+    expect(mapOpenCodeEvent(projects, event, occurredAt)?.projectId).toBe('project-alpha');
   });
 
   test.each([
-    ['unrelated event', { type: 'session.status', properties: { sessionID: 'session-1', status: { type: 'idle' } } }],
-    ['session.error without session ID', { type: 'session.error', properties: {} }],
-    ['malformed event', { type: 'session.idle', properties: {} }],
-  ])('ignores %s', (_caseName, event) => {
-    expect(mapOpenCodeEvent(project, event, occurredAt)).toBeNull();
+    ['unknown event', { id: 'source-unknown', type: 'session.status', data: { sessionID: 'session-1' }, location: { directory: 'C:/Projects/alpha' } }],
+    ['malformed event', { id: 'source-malformed', type: 'session.idle', data: null, location: { directory: 'C:/Projects/alpha' } }],
+    ['event without session ID', { id: 'source-sessionless', type: 'session.error', data: {}, location: { directory: 'C:/Projects/alpha' } }],
+    ['event without location', { id: 'source-no-location', type: 'session.idle', data: { sessionID: 'session-1' } }],
+    ['event without location directory', { id: 'source-no-directory', type: 'session.idle', data: { sessionID: 'session-1' }, location: {} }],
+    ['event from unconfigured location', { id: 'source-other', type: 'session.idle', data: { sessionID: 'session-1' }, location: { directory: 'E:/Other' } }],
+    ['event without ID', { type: 'session.idle', data: { sessionID: 'session-1' }, location: { directory: 'C:/Projects/alpha' } }],
+  ])('ignores_events_without_a_configured_location_or_valid_payload (%s)', (_caseName, event) => {
+    expect(mapOpenCodeEvent(projects, event, occurredAt)).toBeNull();
   });
 });

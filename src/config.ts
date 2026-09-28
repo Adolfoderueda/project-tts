@@ -1,10 +1,11 @@
 import { readFileSync } from 'node:fs';
 import { z } from 'zod';
+import { normalizeProjectDirectory } from './project-paths.js';
 
 export interface ProjectConfig {
   id: string;
   name: string;
-  baseURL: string;
+  directory: string;
 }
 
 export interface BridgeConfig {
@@ -19,20 +20,25 @@ export class ConfigError extends Error {
   }
 }
 
-const httpUrl = z.string().url().refine((value) => {
-  const protocol = new URL(value).protocol;
-  return protocol === 'http:' || protocol === 'https:';
-}, 'baseURL must use http or https');
+const absoluteProjectDirectory = z.string().min(1, 'project directory is required').refine((value) => {
+  try {
+    normalizeProjectDirectory(value);
+    return true;
+  } catch {
+    return false;
+  }
+}, 'project directory must be absolute');
 
 const bridgeConfigSchema = z.object({
   databasePath: z.string().min(1, 'databasePath is required'),
   projects: z.array(z.object({
     id: z.string().min(1, 'project id is required'),
     name: z.string().min(1, 'project name is required'),
-    baseURL: httpUrl,
+    directory: absoluteProjectDirectory,
   })).min(1, 'at least one project is required'),
 }).superRefine((config, context) => {
   const seenProjectIds = new Set<string>();
+  const seenProjectDirectories = new Set<string>();
 
   config.projects.forEach((project, index) => {
     if (seenProjectIds.has(project.id)) {
@@ -45,6 +51,23 @@ const bridgeConfigSchema = z.object({
     }
 
     seenProjectIds.add(project.id);
+
+    let normalizedDirectory: string;
+    try {
+      normalizedDirectory = normalizeProjectDirectory(project.directory);
+    } catch {
+      return;
+    }
+    if (seenProjectDirectories.has(normalizedDirectory)) {
+      context.addIssue({
+        code: 'custom',
+        message: `duplicate project directory: ${project.directory}`,
+        path: ['projects', index, 'directory'],
+      });
+      return;
+    }
+
+    seenProjectDirectories.add(normalizedDirectory);
   });
 });
 

@@ -8,11 +8,10 @@ import type { ProjectConfig } from '../src/events.js';
 
 const tempDirs: string[] = [];
 
-const project: ProjectConfig = {
-  id: 'project-alpha',
-  name: 'Project Alpha',
-  baseURL: 'http://127.0.0.1:4096',
-};
+const projects: ProjectConfig[] = [
+  { id: 'project-alpha', name: 'Project Alpha', directory: 'C:\\Projects\\alpha' },
+  { id: 'project-beta', name: 'Project Beta', directory: 'D:\\Work\\beta' },
+];
 
 async function createStore(): Promise<EventStore> {
   const directory = await mkdtemp(join(tmpdir(), 'project-tts-monitor-'));
@@ -20,70 +19,33 @@ async function createStore(): Promise<EventStore> {
   return new EventStore(join(directory, 'events.sqlite'));
 }
 
-function streamFrom(events: unknown[], options: { failWith?: unknown } = {}): MonitorEventStream {
+function streamFrom(events: unknown[], failure?: unknown): MonitorEventStream {
   return {
     async *[Symbol.asyncIterator]() {
-      for (const event of events) {
-        yield event;
-      }
-      if (options.failWith !== undefined) {
-        throw options.failWith;
+      yield* events;
+      if (failure !== undefined) {
+        throw failure;
       }
     },
   };
 }
 
-function sdkSseStream(frames: Array<{ id: string; data: unknown }>, onSseEvent?: (event: { id: string; data: unknown }) => void): MonitorEventStream {
+function blockingStream(signal: AbortSignal): MonitorEventStream {
   return {
     async *[Symbol.asyncIterator]() {
-      for (const frame of frames) {
-        onSseEvent?.(frame);
-        yield frame.data;
-      }
-    },
-  };
-}
-
-function subscribeResult(stream: MonitorEventStream): { stream: MonitorEventStream } {
-  return { stream };
-}
-
-function blockingStream(signal: AbortSignal): { stream: MonitorEventStream; abortCalled: Promise<void> } {
-  let resolveAbort!: () => void;
-  const abortCalled = new Promise<void>((resolve) => {
-    resolveAbort = resolve;
-  });
-  signal.addEventListener('abort', resolveAbort, { once: true });
-
-  return {
-    stream: {
-      async *[Symbol.asyncIterator]() {
-        await abortCalled;
-      },
-    },
-    abortCalled,
-  };
-}
-
-function deferredDelay() {
-  const delays: number[] = [];
-  const resolvers: Array<() => void> = [];
-  return {
-    delays,
-    sleep: vi.fn((milliseconds: number) => {
-      delays.push(milliseconds);
-      return new Promise<void>((resolve) => {
-        resolvers.push(resolve);
+      await new Promise<void>((resolve) => {
+        if (signal.aborted) {
+          resolve();
+          return;
+        }
+        signal.addEventListener('abort', () => resolve(), { once: true });
       });
-    }),
-    resolveNext() {
-      const resolve = resolvers.shift();
-      if (resolve === undefined) {
-        throw new Error('No pending delay to resolve');
-      }
-      resolve();
     },
   };
+}
+
+function v2Event(id: string, directory: string, sessionID: string, type = 'session.idle') {
+  return { id, type, data: { sessionID }, location: { directory } };
 }
 
 async function flushPromises(): Promise<void> {
@@ -97,259 +59,133 @@ afterEach(async () => {
 });
 
 describe('OpenCodeMonitor', () => {
-  test('subscribes with the monitor AbortSignal and one SDK retry attempt', async () => {
+  test('subscribes once to the global V2 stream with the monitor AbortSignal', async () => {
     const store = await createStore();
     const abortController = new AbortController();
-    const subscribe = vi.fn(({ signal }: { signal: AbortSignal; sseMaxRetryAttempts: number }) => subscribeResult(blockingStream(signal).stream));
+    const subscribe = vi.fn(({ signal }: { signal: AbortSignal }) => blockingStream(signal));
     const client: MonitorClient = { event: { subscribe } };
 
-    const monitor = new OpenCodeMonitor(project, store, { createMonitorClient: () => client });
+    const monitor = new OpenCodeMonitor(projects, store, { createMonitorClient: async () => client });
     const runPromise = monitor.run(abortController.signal);
     await vi.waitFor(() => expect(subscribe).toHaveBeenCalledOnce());
 
-    expect(subscribe).toHaveBeenCalledWith(expect.objectContaining({ signal: abortController.signal, sseMaxRetryAttempts: 1 }));
-
+    expect(subscribe).toHaveBeenCalledWith({ signal: abortController.signal });
     abortController.abort();
     await runPromise;
     store.close();
   });
 
-  test('logs sanitized SDK SSE errors reported through onSseError', async () => {
+  test('routes multiple project events and deduplicates upstream event IDs', async () => {
     const store = await createStore();
     const abortController = new AbortController();
-    const delays = deferredDelay();
-    const logger = { warn: vi.fn() };
-    const subscribe = vi.fn((options: { onSseError?: (error: unknown) => void }) => {
-      options.onSseError?.(new Error('connect ECONNREFUSED token=secret-value'));
-      return subscribeResult(streamFrom([]));
-    });
+    const alphaEvent = v2Event('shared-id', 'C:/Projects/alpha', 'session-alpha');
+    const betaEvent = v2Event('shared-id', 'D:/Work/beta', 'session-beta');
+    const subscribe = vi.fn(() => streamFrom([alphaEvent, alphaEvent, betaEvent]));
     const client: MonitorClient = { event: { subscribe } };
 
-    const monitor = new OpenCodeMonitor(project, store, {
-      createMonitorClient: () => client,
-      sleep: delays.sleep,
-      logger,
-    });
-    const runPromise = monitor.run(abortController.signal);
-    await vi.waitFor(() => expect(logger.warn).toHaveBeenCalledOnce());
-
-    expect(logger.warn).toHaveBeenCalledWith('OpenCode event stream failed for project project-alpha: Error');
-    expect(logger.warn.mock.calls.flat().join(' ')).not.toContain('secret-value');
-
-    await vi.waitFor(() => expect(delays.sleep).toHaveBeenCalledOnce());
-    abortController.abort();
-    delays.resolveNext();
-    await runPromise;
-    store.close();
-  });
-
-  test('persists mapped OpenCode events with the configured project identity', async () => {
-    const store = await createStore();
-    const abortController = new AbortController();
-    const subscribe = vi.fn(({ signal }: { signal: AbortSignal; sseMaxRetryAttempts: number }) => subscribeResult(blockingStream(signal).stream));
-    const client: MonitorClient = {
-      event: {
-        subscribe: subscribe
-          .mockReturnValueOnce(subscribeResult(streamFrom([{ type: 'session.idle', properties: { sessionID: 'session-1' } }])))
-      },
-    };
-
-    const monitor = new OpenCodeMonitor(project, store, { createMonitorClient: () => client, sleep: async () => {} });
-    const runPromise = monitor.run(abortController.signal);
-    await vi.waitFor(() => expect(subscribe).toHaveBeenCalledTimes(2));
-
-    abortController.abort();
-    await runPromise;
-
-    expect(store.list(10)).toMatchObject([
-      {
-        projectId: project.id,
-        projectName: project.name,
-        sessionId: 'session-1',
-        kind: 'turn-ended',
-        summary: 'OpenCode turn finished',
-        rawEventType: 'session.idle',
-      },
-    ]);
-    store.close();
-  });
-
-  test('deduplicates replayed SDK SSE source events across reconnects', async () => {
-    const store = await createStore();
-    const abortController = new AbortController();
-    const delays = deferredDelay();
-    const event = { type: 'session.idle', properties: { sessionID: 'session-1' } };
-    const subscribe = vi.fn((options: { onSseEvent?: (event: { id: string; data: unknown }) => void }) =>
-      subscribeResult(sdkSseStream([{ id: 'sse-event-1', data: event }], options.onSseEvent)),
-    );
-    const client: MonitorClient = { event: { subscribe: subscribe as unknown as MonitorClient['event']['subscribe'] } };
-
-    const monitor = new OpenCodeMonitor(project, store, { createMonitorClient: () => client, sleep: delays.sleep });
-    const runPromise = monitor.run(abortController.signal);
-    await vi.waitFor(() => expect(delays.sleep).toHaveBeenCalledOnce());
-    delays.resolveNext();
-    await vi.waitFor(() => expect(subscribe).toHaveBeenCalledTimes(2));
-
-    abortController.abort();
-    await vi.waitFor(() => expect(delays.sleep).toHaveBeenCalledTimes(2));
-    delays.resolveNext();
-    await runPromise;
-
-    expect(store.list(10)).toMatchObject([
-      {
-        id: JSON.stringify(['project-alpha', 'sse-event-1']),
-        projectId: project.id,
-        sessionId: 'session-1',
-        kind: 'turn-ended',
-      },
-    ]);
-    expect(store.list(10)).toHaveLength(1);
-    store.close();
-  });
-
-  test('ignores unsupported and malformed OpenCode events', async () => {
-    const store = await createStore();
-    const abortController = new AbortController();
-    const subscribe = vi.fn(({ signal }: { signal: AbortSignal; sseMaxRetryAttempts: number }) => subscribeResult(blockingStream(signal).stream));
-    const client: MonitorClient = {
-      event: {
-        subscribe: subscribe
-          .mockReturnValueOnce(subscribeResult(streamFrom([
-            { type: 'session.status', properties: { sessionID: 'session-1' } },
-            { type: 'session.idle', properties: {} },
-            null,
-          ])))
-      },
-    };
-
-    const monitor = new OpenCodeMonitor(project, store, { createMonitorClient: () => client, sleep: async () => {} });
-    const runPromise = monitor.run(abortController.signal);
-    await vi.waitFor(() => expect(subscribe).toHaveBeenCalledTimes(2));
-
-    abortController.abort();
-    await runPromise;
-
-    expect(store.list(10)).toEqual([]);
-    store.close();
-  });
-
-  test('reconnects after stream failures with capped exponential delays', async () => {
-    const store = await createStore();
-    const abortController = new AbortController();
-    const delays = deferredDelay();
-    const subscribe = vi.fn(({ signal }: { signal: AbortSignal; sseMaxRetryAttempts: number }) => subscribeResult(blockingStream(signal).stream));
-    const client: MonitorClient = {
-      event: {
-        subscribe: subscribe
-          .mockReturnValueOnce(subscribeResult(streamFrom([], { failWith: new Error('first') })))
-          .mockReturnValueOnce(subscribeResult(streamFrom([], { failWith: new Error('second') })))
-          .mockReturnValueOnce(subscribeResult(streamFrom([], { failWith: new Error('third') })))
-          .mockReturnValueOnce(subscribeResult(streamFrom([], { failWith: new Error('fourth') })))
-          .mockReturnValueOnce(subscribeResult(streamFrom([], { failWith: new Error('fifth') })))
-          .mockReturnValueOnce(subscribeResult(streamFrom([], { failWith: new Error('sixth') })))
-      },
-    };
-
-    const monitor = new OpenCodeMonitor(project, store, {
-      createMonitorClient: () => client,
-      sleep: delays.sleep,
+    const monitor = new OpenCodeMonitor(projects, store, {
+      createMonitorClient: async () => client,
+      sleep: async () => abortController.abort(),
       logger: { warn: vi.fn() },
     });
-    const runPromise = monitor.run(abortController.signal);
+    await monitor.run(abortController.signal);
 
-    for (let index = 0; index < 6; index += 1) {
-      await flushPromises();
-      delays.resolveNext();
-    }
-    await flushPromises();
-
-    abortController.abort();
-    await runPromise;
-
-    expect(delays.delays).toEqual([1_000, 2_000, 4_000, 8_000, 16_000, 30_000]);
-    expect(store.list(10)).toEqual([]);
+    expect(subscribe).toHaveBeenCalledOnce();
+    expect(store.list(10)).toMatchObject([
+      { id: JSON.stringify(['project-beta', 'shared-id']), projectId: 'project-beta', sessionId: 'session-beta' },
+      { id: JSON.stringify(['project-alpha', 'shared-id']), projectId: 'project-alpha', sessionId: 'session-alpha' },
+    ]);
+    expect(store.list(10)).toHaveLength(2);
     store.close();
   });
 
-  test('abort signal cancels the active stream and stops without scheduling another reconnect', async () => {
+  test('reports_v2_stream_gaps_without_persisting_transport_errors', async () => {
     const store = await createStore();
     const abortController = new AbortController();
-    const delays = deferredDelay();
-    let abortCalled!: Promise<void>;
-    const subscribe = vi.fn(({ signal }: { signal: AbortSignal; sseMaxRetryAttempts: number }) => {
-      const blocking = blockingStream(signal);
-      abortCalled = blocking.abortCalled;
-      return subscribeResult(blocking.stream);
-    });
+    const logger = { warn: vi.fn() };
+    const subscribe = vi.fn(() => streamFrom([], new Error('ECONNRESET bearer=secret-token')));
     const client: MonitorClient = { event: { subscribe } };
+    const delays: number[] = [];
 
-    const monitor = new OpenCodeMonitor(project, store, {
-      createMonitorClient: () => client,
-      sleep: delays.sleep,
-    });
-    const runPromise = monitor.run(abortController.signal);
-    await flushPromises();
-
-    abortController.abort();
-    await abortCalled;
-    await runPromise;
-
-    expect(delays.sleep).not.toHaveBeenCalled();
-    expect(subscribe).toHaveBeenCalledTimes(1);
-    store.close();
-  });
-
-  test('keeps retrying unavailable endpoints without rejecting the monitor promise', async () => {
-    const store = await createStore();
-    const abortController = new AbortController();
-    const delays = deferredDelay();
-    const logger = { warn: vi.fn() };
-    const client: MonitorClient = {
-      event: {
-        subscribe: vi.fn(() => {
-          throw new Error('connect ECONNREFUSED token=secret');
-        }),
-      },
-    };
-
-    const monitor = new OpenCodeMonitor(project, store, {
-      createMonitorClient: () => client,
-      sleep: delays.sleep,
-      logger,
-    });
-    const runPromise = monitor.run(abortController.signal);
-
-    await flushPromises();
-    expect(delays.delays).toEqual([1_000]);
-    delays.resolveNext();
-    await flushPromises();
-    expect(delays.delays).toEqual([1_000, 2_000]);
-
-    abortController.abort();
-    delays.resolveNext();
-    await expect(runPromise).resolves.toBeUndefined();
-    expect(store.list(10)).toEqual([]);
-    expect(logger.warn).toHaveBeenCalledWith('OpenCode event stream failed for project project-alpha: Error');
-    store.close();
-  });
-
-  test('propagates inbox persistence failures instead of reconnecting as if the stream failed', async () => {
-    const store = await createStore();
-    store.close();
-    const abortController = new AbortController();
-    const logger = { warn: vi.fn() };
-    const client: MonitorClient = {
-      event: {
-        subscribe: vi.fn(() =>
-          subscribeResult(streamFrom([{ type: 'session.idle', properties: { sessionID: 'session-1' } }])),
-        ),
-      },
-    };
-    const monitor = new OpenCodeMonitor(project, store, {
-      createMonitorClient: () => client,
-      sleep: async () => {
+    const monitor = new OpenCodeMonitor(projects, store, {
+      createMonitorClient: async () => client,
+      sleep: async (milliseconds) => {
+        delays.push(milliseconds);
         abortController.abort();
       },
+      logger,
+    });
+    await monitor.run(abortController.signal);
+
+    expect(logger.warn).toHaveBeenCalledWith(expect.stringMatching(/V2 event stream disconnected.*events during this outage may have been missed/u));
+    expect(logger.warn.mock.calls.flat().join(' ')).not.toContain('secret-token');
+    expect(store.list(10)).toEqual([]);
+    expect(delays).toEqual([1_000]);
+    store.close();
+  });
+
+  test('reconnects with capped exponential delays', async () => {
+    const store = await createStore();
+    const abortController = new AbortController();
+    const delays: number[] = [];
+    const subscribe = vi.fn(() => streamFrom([], new Error('connection failed')));
+    const client: MonitorClient = { event: { subscribe } };
+
+    const monitor = new OpenCodeMonitor(projects, store, {
+      createMonitorClient: async () => client,
+      sleep: async (milliseconds) => {
+        delays.push(milliseconds);
+        if (delays.length === 7) {
+          abortController.abort();
+        }
+      },
+      logger: { warn: vi.fn() },
+    });
+    await monitor.run(abortController.signal);
+
+    expect(delays).toEqual([1_000, 2_000, 4_000, 8_000, 16_000, 30_000, 30_000]);
+    expect(subscribe).toHaveBeenCalledTimes(7);
+    store.close();
+  });
+
+  test('retries_when_v2_service_is_unavailable_without_leaking_diagnostics', async () => {
+    const store = await createStore();
+    const abortController = new AbortController();
+    const logger = { warn: vi.fn() };
+    const createMonitorClient = vi.fn(async () => {
+      throw new Error('service auth token=private-token');
+    });
+    const delays: number[] = [];
+
+    const monitor = new OpenCodeMonitor(projects, store, {
+      createMonitorClient,
+      sleep: async (milliseconds) => {
+        delays.push(milliseconds);
+        if (delays.length === 2) {
+          abortController.abort();
+        }
+      },
+      logger,
+    });
+    await monitor.run(abortController.signal);
+
+    expect(createMonitorClient).toHaveBeenCalledTimes(2);
+    expect(delays).toEqual([1_000, 2_000]);
+    expect(logger.warn).toHaveBeenCalledWith(expect.stringMatching(/OpenCode V2 service is unavailable.*background service is running/u));
+    expect(logger.warn.mock.calls.flat().join(' ')).not.toContain('private-token');
+    store.close();
+  });
+
+  test('persistence failures propagate rather than reconnecting', async () => {
+    const store = await createStore();
+    store.close();
+    const abortController = new AbortController();
+    const logger = { warn: vi.fn() };
+    const client: MonitorClient = {
+      event: { subscribe: vi.fn(() => streamFrom([v2Event('event-1', 'C:/Projects/alpha', 'session-1')])) },
+    };
+    const monitor = new OpenCodeMonitor(projects, store, {
+      createMonitorClient: async () => client,
       logger,
     });
 

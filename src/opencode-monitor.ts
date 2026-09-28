@@ -1,30 +1,20 @@
-import { createOpencodeClient } from '@opencode-ai/sdk';
+import { OpenCode } from '@opencode/client';
+import { Service } from '@opencode/client/service';
 import { mapOpenCodeEvent, type ProjectConfig } from './events.js';
 import { EventStore } from './store.js';
 
 export type MonitorEventStream = AsyncIterable<unknown>;
 
-interface SubscribeOptions {
-  signal: AbortSignal;
-  sseMaxRetryAttempts: number;
-  onSseError?: (error: unknown) => void;
-  onSseEvent?: (event: { id?: string; data?: unknown }) => void;
-}
-
-interface SubscribeResult {
-  stream: MonitorEventStream;
-}
-
 export interface MonitorClient {
   event: {
-    subscribe(options: SubscribeOptions): SubscribeResult | Promise<SubscribeResult>;
+    subscribe(options: { signal: AbortSignal }): MonitorEventStream;
   };
 }
 
 type Sleep = (milliseconds: number, signal?: AbortSignal) => Promise<void>;
 type Logger = Pick<typeof console, 'warn'>;
 
-export type CreateMonitorClient = (project: ProjectConfig) => MonitorClient;
+export type CreateMonitorClient = () => Promise<MonitorClient>;
 
 interface OpenCodeMonitorOptions {
   createMonitorClient?: CreateMonitorClient;
@@ -33,6 +23,8 @@ interface OpenCodeMonitorOptions {
 }
 
 const reconnectDelaysMs = [1_000, 2_000, 4_000, 8_000, 16_000, 30_000] as const;
+const streamGapWarning = 'OpenCode V2 event stream disconnected; events during this outage may have been missed because V2 does not replay events.';
+const serviceUnavailableWarning = 'OpenCode V2 service is unavailable; ensure the OpenCode background service is running before the bridge retries.';
 
 class AbortError extends Error {
   constructor() {
@@ -87,32 +79,33 @@ function getReconnectDelay(failureCount: number): number {
   return reconnectDelaysMs[Math.min(failureCount, reconnectDelaysMs.length - 1)];
 }
 
-function diagnosticName(error: unknown): string {
-  if (error instanceof Error && error.name.length > 0) {
-    return error.name;
-  }
-  return typeof error;
-}
-
 function isAbortLikeError(error: unknown): boolean {
   return error instanceof Error && error.name === 'AbortError';
 }
 
-export function createMonitorClient(project: ProjectConfig): MonitorClient {
-  return createOpencodeClient({ baseUrl: project.baseURL }) as MonitorClient;
+export async function createMonitorClient(): Promise<MonitorClient> {
+  const endpoint = await Service.discover();
+  if (endpoint === undefined) {
+    throw new Error('No healthy OpenCode V2 service was discovered');
+  }
+
+  return OpenCode.make({
+    baseUrl: endpoint.url,
+    headers: Service.headers(endpoint),
+  });
 }
 
 export class OpenCodeMonitor {
-  readonly #project: ProjectConfig;
+  readonly #projects: readonly ProjectConfig[];
   readonly #store: EventStore;
-  readonly #client: MonitorClient;
+  readonly #createMonitorClient: CreateMonitorClient;
   readonly #sleep: Sleep;
   readonly #logger: Logger;
 
-  constructor(project: ProjectConfig, store: EventStore, options: OpenCodeMonitorOptions = {}) {
-    this.#project = project;
+  constructor(projects: readonly ProjectConfig[], store: EventStore, options: OpenCodeMonitorOptions = {}) {
+    this.#projects = projects;
     this.#store = store;
-    this.#client = (options.createMonitorClient ?? createMonitorClient)(project);
+    this.#createMonitorClient = options.createMonitorClient ?? createMonitorClient;
     this.#sleep = options.sleep ?? defaultSleep;
     this.#logger = options.logger ?? console;
   }
@@ -121,39 +114,30 @@ export class OpenCodeMonitor {
     let failureCount = 0;
 
     while (!signal.aborted) {
-      let streamErrorReported = false;
-      const logStreamFailure = (error: unknown) => {
-        if (signal.aborted || streamErrorReported) {
-          return;
+      let client: MonitorClient;
+      try {
+        client = await this.#createMonitorClient();
+      } catch {
+        if (signal.aborted) {
+          break;
         }
-
-        streamErrorReported = true;
-        this.#logger.warn(`OpenCode event stream failed for project ${this.#project.id}: ${diagnosticName(error)}`);
-      };
+        this.#logger.warn(serviceUnavailableWarning);
+        await this.#waitBeforeReconnect(failureCount, signal);
+        failureCount += 1;
+        continue;
+      }
 
       try {
-        const sourceEventIds = new WeakMap<object, string>();
-        const result = await this.#client.event.subscribe({
-          signal,
-          sseMaxRetryAttempts: 1,
-          onSseError: logStreamFailure,
-          onSseEvent: ({ id, data }) => {
-            if (typeof id === 'string' && id.length > 0 && typeof data === 'object' && data !== null) {
-              sourceEventIds.set(data, id);
-            }
-          },
-        });
-
-        for await (const event of result.stream) {
+        const stream = client.event.subscribe({ signal });
+        for await (const event of stream) {
           if (signal.aborted) {
             break;
           }
 
-          const sourceEventId = typeof event === 'object' && event !== null ? sourceEventIds.get(event) : undefined;
-          const mappedEvent = mapOpenCodeEvent(this.#project, event, new Date(), sourceEventId);
-          if (mappedEvent !== null) {
+          const capturedEvent = mapOpenCodeEvent(this.#projects, event, new Date());
+          if (capturedEvent !== null) {
             try {
-              this.#store.insert(mappedEvent);
+              this.#store.insert(capturedEvent);
             } catch (error) {
               throw new EventPersistenceError(error);
             }
@@ -163,31 +147,33 @@ export class OpenCodeMonitor {
         if (signal.aborted) {
           break;
         }
+
+        this.#logger.warn(streamGapWarning);
       } catch (error) {
         if (error instanceof EventPersistenceError) {
           throw error;
         }
-
         if (signal.aborted || isAbortLikeError(error)) {
           break;
         }
 
-        logStreamFailure(error);
+        this.#logger.warn(streamGapWarning);
       }
 
       if (signal.aborted) {
         break;
       }
 
-      const delay = getReconnectDelay(failureCount);
+      await this.#waitBeforeReconnect(failureCount, signal);
       failureCount += 1;
+    }
+  }
 
-      try {
-        await this.#sleep(delay, signal);
-      } catch (error) {
-        if (signal.aborted || isAbortLikeError(error)) {
-          break;
-        }
+  async #waitBeforeReconnect(failureCount: number, signal: AbortSignal): Promise<void> {
+    try {
+      await this.#sleep(getReconnectDelay(failureCount), signal);
+    } catch (error) {
+      if (!signal.aborted && !isAbortLikeError(error)) {
         throw error;
       }
     }

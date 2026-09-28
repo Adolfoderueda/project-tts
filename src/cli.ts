@@ -11,7 +11,7 @@ export interface CliIo {
 
 export interface CliDependencies {
   createStore(path: string): EventStore;
-  createMonitor(project: ProjectConfig, store: EventStore): Pick<OpenCodeMonitor, 'run'>;
+  createMonitor(projects: readonly ProjectConfig[], store: EventStore): Pick<OpenCodeMonitor, 'run'>;
   onSigint(handler: () => void): () => void;
 }
 
@@ -24,7 +24,7 @@ Commands:
 
 const defaultDependencies: CliDependencies = {
   createStore: (path) => new EventStore(path),
-  createMonitor: (project, store) => new OpenCodeMonitor(project, store),
+  createMonitor: (projects, store) => new OpenCodeMonitor(projects, store),
   onSigint: (handler) => {
     process.on('SIGINT', handler);
     return () => {
@@ -132,22 +132,24 @@ async function runStart(args: string[], io: CliIo, dependencies: CliDependencies
   let store: EventStore | undefined;
   let unsubscribeSigint: (() => void) | undefined;
   const abortController = new AbortController();
-  let runPromises: Promise<void>[] = [];
+  let runPromise: Promise<void> | undefined;
 
   try {
     const config = loadConfig(parsed.configPath);
     store = dependencies.createStore(config.databasePath);
     const sharedStore = store;
-    const monitors = config.projects.map((project) => dependencies.createMonitor(project, sharedStore));
+    const monitor = dependencies.createMonitor(config.projects, sharedStore);
     unsubscribeSigint = dependencies.onSigint(() => {
       abortController.abort();
     });
-    runPromises = monitors.map((monitor) => monitor.run(abortController.signal));
-    await Promise.all(runPromises);
+    runPromise = monitor.run(abortController.signal);
+    await runPromise;
     return 0;
   } catch (error) {
     abortController.abort();
-    await Promise.allSettled(runPromises);
+    if (runPromise !== undefined) {
+      await Promise.allSettled([runPromise]);
+    }
     io.stderr.write(`${conciseDiagnostic(error)}\n`);
     return 1;
   } finally {

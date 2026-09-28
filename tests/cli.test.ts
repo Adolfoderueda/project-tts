@@ -85,24 +85,22 @@ describe('cli', () => {
     expect(stdout.output()).toBe('');
   });
 
-  test('start_creates_a_monitor_for_every_configured_project', async () => {
+  test('start_creates_one_monitor_for_all_configured_projects', async () => {
     const directory = await mkdtemp(join(tmpdir(), 'project-voice-bridge-cli-'));
     const configPath = await writeConfig(directory, join(directory, 'events.sqlite'), [
-      { id: 'alpha', name: 'Alpha', baseURL: 'http://127.0.0.1:4096' },
-      { id: 'bravo', name: 'Bravo', baseURL: 'http://127.0.0.1:4097' },
+      { id: 'alpha', name: 'Alpha', directory: 'C:\\Projects\\alpha' },
+      { id: 'bravo', name: 'Bravo', directory: 'D:\\Work\\bravo' },
     ]);
-    const startedProjects: string[] = [];
+    const startedProjects: string[][] = [];
     let sigintHandler: (() => void) | undefined;
     const dependencies = createStartDependencies({
       onSigint: (handler) => {
         sigintHandler = handler;
         return () => undefined;
       },
-      onRun: (project, signal) => {
-        startedProjects.push(project.id);
-        if (startedProjects.length === 2) {
-          sigintHandler?.();
-        }
+      onRun: (configuredProjects, signal) => {
+        startedProjects.push(configuredProjects.map(({ id }) => id));
+        sigintHandler?.();
         return waitForAbort(signal);
       },
     });
@@ -112,82 +110,33 @@ describe('cli', () => {
     const exitCode = await main(['start', '--config', configPath], { stdout: stdout.stream, stderr: stderr.stream }, dependencies);
 
     expect(exitCode).toBe(0);
-    expect(startedProjects).toEqual(['alpha', 'bravo']);
+    expect(startedProjects).toEqual([['alpha', 'bravo']]);
     expect(stderr.output()).toBe('');
   });
 
-  test('start_aborts_all_monitors_and_closes_store_on_sigint', async () => {
+  test('start_closes_store_after_global_monitor_failure', async () => {
     const directory = await mkdtemp(join(tmpdir(), 'project-voice-bridge-cli-'));
+    const stderr = captureWritable();
     const configPath = await writeConfig(directory, join(directory, 'events.sqlite'), [
-      { id: 'alpha', name: 'Alpha', baseURL: 'http://127.0.0.1:4096' },
-      { id: 'bravo', name: 'Bravo', baseURL: 'http://127.0.0.1:4097' },
+      { id: 'alpha', name: 'Alpha', directory: 'C:\\Projects\\alpha' },
+      { id: 'bravo', name: 'Bravo', directory: 'D:\\Work\\bravo' },
     ]);
-    let sigintHandler: (() => void) | undefined;
-    const abortedProjects: string[] = [];
     let closeCount = 0;
     const dependencies = createStartDependencies({
       close: () => {
         closeCount += 1;
       },
-      onSigint: (handler) => {
-        sigintHandler = handler;
-        return () => undefined;
-      },
-      onRun: (project, signal) => {
-        if (project.id === 'bravo') {
-          sigintHandler?.();
-        }
-        return waitForAbort(signal).then(() => {
-          abortedProjects.push(project.id);
-        });
-      },
-    });
-
-    const exitCode = await main(['start', '--config', configPath], undefined, dependencies);
-
-    expect(exitCode).toBe(0);
-    expect(abortedProjects.sort()).toEqual(['alpha', 'bravo']);
-    expect(closeCount).toBe(1);
-  });
-
-  test('start_waits_for_sibling_monitors_to_settle_before_closing_store_after_runtime_failure', async () => {
-    const directory = await mkdtemp(join(tmpdir(), 'project-voice-bridge-cli-'));
-    const configPath = await writeConfig(directory, join(directory, 'events.sqlite'), [
-      { id: 'alpha', name: 'Alpha', baseURL: 'http://127.0.0.1:4096' },
-      { id: 'bravo', name: 'Bravo', baseURL: 'http://127.0.0.1:4097' },
-    ]);
-    let siblingObservedAbort = false;
-    let siblingSettled = false;
-    let closeObservedSiblingSettled: boolean | undefined;
-    const stdout = captureWritable();
-    const stderr = captureWritable();
-    const dependencies = createStartDependencies({
-      close: () => {
-        closeObservedSiblingSettled = siblingSettled;
-      },
       onSigint: () => () => undefined,
-      onRun: (project, signal) => {
-        if (project.id === 'alpha') {
-          return Promise.reject(new Error('alpha monitor failed'));
-        }
-
-        return waitForAbort(signal).then(() => new Promise<void>((resolve) => {
-          siblingObservedAbort = true;
-          setTimeout(() => {
-            siblingSettled = true;
-            resolve();
-          }, 0);
-        }));
+      onRun: async () => {
+        throw new Error('global monitor failed');
       },
     });
 
-    const exitCode = await main(['start', '--config', configPath], { stdout: stdout.stream, stderr: stderr.stream }, dependencies);
+    const exitCode = await main(['start', '--config', configPath], { stdout: captureWritable().stream, stderr: stderr.stream }, dependencies);
 
     expect(exitCode).toBe(1);
-    expect(stderr.output()).toContain('alpha monitor failed');
-    expect(stdout.output()).toBe('');
-    expect(siblingObservedAbort).toBe(true);
-    expect(closeObservedSiblingSettled).toBe(true);
+    expect(closeCount).toBe(1);
+    expect(stderr.output()).toContain('global monitor failed');
   });
 
   test('invalid_config_returns_one_with_concise_diagnostic', async () => {
@@ -209,7 +158,7 @@ describe('cli', () => {
 async function writeConfig(
   directory: string,
   databasePath: string,
-  projects: ProjectConfig[] = [{ id: 'demo', name: 'Demo Project', baseURL: 'http://127.0.0.1:4096' }],
+  projects: ProjectConfig[] = [{ id: 'demo', name: 'Demo Project', directory: 'C:\\Projects\\demo' }],
 ): Promise<string> {
   const configPath = join(directory, 'config.json');
   await writeFile(configPath, JSON.stringify({ databasePath, projects }, null, 2));
@@ -239,7 +188,7 @@ function seedEvents(databasePath: string, count: number): void {
 function createStartDependencies(options: {
   close?: () => void;
   onSigint: (handler: () => void) => () => void;
-  onRun: (project: ProjectConfig, signal: AbortSignal) => Promise<void>;
+  onRun: (projects: readonly ProjectConfig[], signal: AbortSignal) => Promise<void>;
 }): CliDependencies {
   return {
     createStore: () => ({
@@ -247,8 +196,8 @@ function createStartDependencies(options: {
       insert: () => undefined,
       list: () => [],
     } as unknown as EventStore),
-    createMonitor: (project) => ({
-      run: (signal) => options.onRun(project, signal),
+    createMonitor: (projects) => ({
+      run: (signal) => options.onRun(projects, signal),
     }),
     onSigint: options.onSigint,
   };

@@ -28,7 +28,7 @@
     "better-sqlite3@13.0.3": true
   },
   "dependencies": {
-    "@opencode-ai/sdk": "^1.18.32",
+    "@opencode/client": "^2.0.18",
     "better-sqlite3": "^13.0.3",
     "zod": "^4.6.5"
   }
