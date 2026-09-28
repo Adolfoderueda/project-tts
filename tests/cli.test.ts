@@ -8,6 +8,9 @@ import { EventStore } from '../src/store.js';
 import type { CapturedEvent } from '../src/events.js';
 import type { ProjectConfig } from '../src/config.js';
 
+const alphaDirectory = join(tmpdir(), 'project-voice-bridge-projects', 'alpha');
+const bravoDirectory = join(tmpdir(), 'project-voice-bridge-projects', 'bravo');
+
 function captureWritable() {
   let output = '';
   const stream = new Writable({
@@ -88,12 +91,16 @@ describe('cli', () => {
   test('start_creates_one_monitor_for_all_configured_projects', async () => {
     const directory = await mkdtemp(join(tmpdir(), 'project-voice-bridge-cli-'));
     const configPath = await writeConfig(directory, join(directory, 'events.sqlite'), [
-      { id: 'alpha', name: 'Alpha', directory: 'C:\\Projects\\alpha' },
-      { id: 'bravo', name: 'Bravo', directory: 'D:\\Work\\bravo' },
+      { id: 'alpha', name: 'Alpha', directory: alphaDirectory },
+      { id: 'bravo', name: 'Bravo', directory: bravoDirectory },
     ]);
     const startedProjects: string[][] = [];
+    let closeCount = 0;
     let sigintHandler: (() => void) | undefined;
     const dependencies = createStartDependencies({
+      close: () => {
+        closeCount += 1;
+      },
       onSigint: (handler) => {
         sigintHandler = handler;
         return () => undefined;
@@ -111,6 +118,7 @@ describe('cli', () => {
 
     expect(exitCode).toBe(0);
     expect(startedProjects).toEqual([['alpha', 'bravo']]);
+    expect(closeCount).toBe(1);
     expect(stderr.output()).toBe('');
   });
 
@@ -118,8 +126,8 @@ describe('cli', () => {
     const directory = await mkdtemp(join(tmpdir(), 'project-voice-bridge-cli-'));
     const stderr = captureWritable();
     const configPath = await writeConfig(directory, join(directory, 'events.sqlite'), [
-      { id: 'alpha', name: 'Alpha', directory: 'C:\\Projects\\alpha' },
-      { id: 'bravo', name: 'Bravo', directory: 'D:\\Work\\bravo' },
+      { id: 'alpha', name: 'Alpha', directory: alphaDirectory },
+      { id: 'bravo', name: 'Bravo', directory: bravoDirectory },
     ]);
     let closeCount = 0;
     const dependencies = createStartDependencies({
@@ -158,7 +166,7 @@ describe('cli', () => {
 async function writeConfig(
   directory: string,
   databasePath: string,
-  projects: ProjectConfig[] = [{ id: 'demo', name: 'Demo Project', directory: 'C:\\Projects\\demo' }],
+  projects: ProjectConfig[] = [{ id: 'demo', name: 'Demo Project', directory: join(tmpdir(), 'project-voice-bridge-projects', 'demo') }],
 ): Promise<string> {
   const configPath = join(directory, 'config.json');
   await writeFile(configPath, JSON.stringify({ databasePath, projects }, null, 2));

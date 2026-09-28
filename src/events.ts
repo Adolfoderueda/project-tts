@@ -16,7 +16,7 @@ export interface CapturedEvent {
 
 interface AcceptedEvent {
   id: string;
-  type: 'session.idle' | 'permission.asked' | 'permission.v2.asked' | 'session.error';
+  type: 'session.idle' | 'permission.asked' | 'session.execution.failed';
   data: { sessionID: string };
   location: { directory: string };
 }
@@ -31,7 +31,7 @@ function asAcceptedEvent(event: unknown): AcceptedEvent | null {
     return null;
   }
 
-  if (candidate.type !== 'session.idle' && candidate.type !== 'permission.asked' && candidate.type !== 'permission.v2.asked' && candidate.type !== 'session.error') {
+  if (candidate.type !== 'session.idle' && candidate.type !== 'permission.asked' && candidate.type !== 'session.execution.failed') {
     return null;
   }
 
@@ -81,8 +81,7 @@ export function mapOpenCodeEvent(projects: readonly ProjectConfig[], event: unkn
   const eventDetails = {
     'session.idle': { kind: 'turn-ended', summary: 'OpenCode turn finished' },
     'permission.asked': { kind: 'waiting-for-input', summary: 'OpenCode is waiting for input' },
-    'permission.v2.asked': { kind: 'waiting-for-input', summary: 'OpenCode is waiting for input' },
-    'session.error': { kind: 'error', summary: 'OpenCode session error' },
+    'session.execution.failed': { kind: 'error', summary: 'OpenCode session error' },
   } as const satisfies Record<AcceptedEvent['type'], Pick<CapturedEvent, 'kind' | 'summary'>>;
 
   const details = eventDetails[acceptedEvent.type];

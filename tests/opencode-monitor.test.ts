@@ -7,10 +7,12 @@ import { OpenCodeMonitor, defaultSleep, type MonitorClient, type MonitorEventStr
 import type { ProjectConfig } from '../src/events.js';
 
 const tempDirs: string[] = [];
+const alphaDirectory = join(tmpdir(), 'project-tts-monitor-projects', 'alpha');
+const betaDirectory = join(tmpdir(), 'project-tts-monitor-projects', 'beta');
 
 const projects: ProjectConfig[] = [
-  { id: 'project-alpha', name: 'Project Alpha', directory: 'C:\\Projects\\alpha' },
-  { id: 'project-beta', name: 'Project Beta', directory: 'D:\\Work\\beta' },
+  { id: 'project-alpha', name: 'Project Alpha', directory: alphaDirectory },
+  { id: 'project-beta', name: 'Project Beta', directory: betaDirectory },
 ];
 
 async function createStore(): Promise<EventStore> {
@@ -78,8 +80,8 @@ describe('OpenCodeMonitor', () => {
   test('routes multiple project events and deduplicates upstream event IDs', async () => {
     const store = await createStore();
     const abortController = new AbortController();
-    const alphaEvent = v2Event('shared-id', 'C:/Projects/alpha', 'session-alpha');
-    const betaEvent = v2Event('shared-id', 'D:/Work/beta', 'session-beta');
+    const alphaEvent = v2Event('shared-id', alphaDirectory, 'session-alpha');
+    const betaEvent = v2Event('shared-id', betaDirectory, 'session-beta');
     const subscribe = vi.fn(() => streamFrom([alphaEvent, alphaEvent, betaEvent]));
     const client: MonitorClient = { event: { subscribe } };
 
@@ -148,6 +150,37 @@ describe('OpenCodeMonitor', () => {
     store.close();
   });
 
+  test('resets reconnect backoff after a sustained healthy stream', async () => {
+    const store = await createStore();
+    const abortController = new AbortController();
+    const delays: number[] = [];
+    let now = 0;
+    const subscribe = vi.fn(() => {
+      if (subscribe.mock.calls.length === 1) {
+        return streamFrom([], new Error('short failure'));
+      }
+      now += 60_000;
+      return streamFrom([]);
+    });
+    const client: MonitorClient = { event: { subscribe } };
+
+    const monitor = new OpenCodeMonitor(projects, store, {
+      createMonitorClient: async () => client,
+      sleep: async (milliseconds) => {
+        delays.push(milliseconds);
+        if (delays.length === 2) {
+          abortController.abort();
+        }
+      },
+      now: () => now,
+      logger: { warn: vi.fn() },
+    });
+    await monitor.run(abortController.signal);
+
+    expect(delays).toEqual([1_000, 1_000]);
+    store.close();
+  });
+
   test('retries_when_v2_service_is_unavailable_without_leaking_diagnostics', async () => {
     const store = await createStore();
     const abortController = new AbortController();
@@ -182,7 +215,7 @@ describe('OpenCodeMonitor', () => {
     const abortController = new AbortController();
     const logger = { warn: vi.fn() };
     const client: MonitorClient = {
-      event: { subscribe: vi.fn(() => streamFrom([v2Event('event-1', 'C:/Projects/alpha', 'session-1')])) },
+      event: { subscribe: vi.fn(() => streamFrom([v2Event('event-1', alphaDirectory, 'session-1')])) },
     };
     const monitor = new OpenCodeMonitor(projects, store, {
       createMonitorClient: async () => client,

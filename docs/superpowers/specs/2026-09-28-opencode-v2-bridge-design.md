@@ -20,8 +20,8 @@ Update the existing OpenCode bridge to integrate with the user's installed OpenC
 - V2 events use `{ id, type, data, location? }`; use the upstream event `id`, namespaced with the configured project ID, as the stable inbox ID.
 - Mapping:
   - `session.idle` with `data.sessionID` → `turn-ended` / “OpenCode turn finished”.
-  - `permission.asked` or `permission.v2.asked` with `data.sessionID` → `waiting-for-input`.
-  - `session.error` with `data.sessionID` → `error`.
+  - `permission.asked` with `data.sessionID` → `waiting-for-input`.
+  - `session.execution.failed` with `data.sessionID` → `error`.
   - Unknown, malformed, unconfigured-location, or session-less events are ignored.
 - Keep the existing SQLite schema and CLI `events` command unless implementation planning identifies a necessary interface change. Persist normalized events locally before any future relay work.
 - Reconnect using bounded exponential backoff and stop on abort. Since V2 cannot replay events missed during an OpenCode-stream outage, emit a clear sanitized warning when a subscription fails or ends and never infer completion from current session state.
@@ -43,7 +43,7 @@ Update the existing OpenCode bridge to integrate with the user's installed OpenC
 
 ## Validation
 
-- Unit-test typed V2 event mappings, stable project-scoped IDs, path routing across multiple configured projects, unknown/malformed events, and duplicate event IDs.
+- Unit-test typed V2 event mappings (including the V2 SDK's `session.execution.failed` event), stable project-scoped IDs, path routing across multiple configured projects, unknown/malformed events, and duplicate event IDs.
 - Test one global subscription, abort/shutdown, reconnect delay/cap, sanitized stream-failure diagnostics, and the explicit no-replay warning behavior.
 - Test configuration with two project directories and reject duplicate/invalid directories.
 - Keep persistence failures fatal to the monitor rather than classifying them as transport failures.
@@ -54,7 +54,7 @@ Update the existing OpenCode bridge to integrate with the user's installed OpenC
 
 - The bridge subscribes to the V2 `/api/event` surface through the official V2 client/service integration and does not call the legacy `/event` endpoint.
 - Events from two configured project directories are attributed only to the matching project; unknown locations are ignored.
-- The three existing event categories map from current V2 event names and payloads without inferring stronger completion semantics.
+- The three event categories map from the V2 SDK's current event names and payloads (`session.idle`, `permission.asked`, `session.execution.failed`) without inferring stronger completion semantics.
 - Repeated delivery of the same V2 event ID for a project produces at most one inbox row.
 - Stream abort and reconnect are handled safely; storage failures propagate.
 - Logs clearly disclose that the live V2 stream does not replay events missed during disconnection.

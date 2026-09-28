@@ -27,9 +27,9 @@
 
 ## Review Focus
 
-- Windows path case and trailing separators must still match the exact configured project; cover with `normalizes_windows_project_directories_for_exact_matching` in Task 1.
+- Windows path case and trailing separators must still match the exact configured project; cover with `normalizes_windows_project_directories_for_exact_matching` in `tests/project-paths.test.ts` during Task 1.
 - An event with absent, malformed, or unconfigured `location.directory` must not be attributed to an arbitrary project; cover with `ignores_events_without_a_configured_location` in Task 1.
-- V2 permission variants and session errors may have different or missing `data.sessionID` fields; cover both permission names and session-less events in Task 1.
+- V2 permission and execution-failure events may have missing `data.sessionID` fields; cover `permission.asked`, SDK-typed `session.execution.failed`, and session-less events in Task 1.
 - Missing/malformed event IDs and repeated IDs must not create unstable or cross-project inbox identities; cover with `uses_project_scoped_v2_event_ids_and_ignores_missing_ids` in Task 1.
 - An unavailable/unauthorized service or stream failure must neither leak auth details nor be reported as a session error; cover with `retries_when_v2_service_is_unavailable_without_leaking_diagnostics` and `reports_v2_stream_gaps_without_persisting_transport_errors` in Task 1.
 
@@ -44,7 +44,7 @@
 - `src/cli.ts`: start exactly one monitor for the configured project set; keep `events` behavior unchanged.
 - `package.json`, `package-lock.json`: replace `@opencode-ai/sdk` with `@opencode/client`.
 - `config.example.json`, `README.md`: document absolute project directories and the requirement that an OpenCode V2 background service is running.
-- `tests/config.test.ts`, `tests/events.test.ts`, `tests/opencode-monitor.test.ts`, `tests/cli.test.ts`: update/extend behavior coverage using V2-shaped event fixtures and injected service/client boundaries.
+- `tests/config.test.ts`, `tests/events.test.ts`, `tests/project-paths.test.ts`, `tests/opencode-monitor.test.ts`, `tests/cli.test.ts`: update/extend behavior coverage using platform-neutral project paths, V2-shaped event fixtures, and injected service/client boundaries.
 
 ## Interfaces
 
@@ -67,6 +67,7 @@
 - Modify: `src/config.ts`, `src/events.ts`, `src/opencode-monitor.ts`, `src/cli.ts`
 - Modify: `config.example.json`, `README.md`
 - Modify: `tests/config.test.ts`, `tests/events.test.ts`, `tests/opencode-monitor.test.ts`, `tests/cli.test.ts`
+- Create: `tests/project-paths.test.ts`
 
 **Interfaces:**
 - Consumes: existing `EventStore`, `CapturedEvent`, and CLI `main(argv, io?, dependencies?)`.
@@ -74,20 +75,20 @@
 
 - [x] **Step 1: Write config and event-normalization tests first**
 
-Update config fixtures to use two absolute `directory` values. Add named tests for duplicate normalized directories, relative paths, Windows case/trailing-separator matching, and duplicate project IDs. Add V2 event fixtures shaped `{ id, type, data, location }` and cover `session.idle`, `permission.asked`, `permission.v2.asked`, and `session.error`; assert exact category, summary, session, project, and stable namespaced ID. Assert unknown/malformed events, absent IDs, absent session IDs, and unconfigured/missing locations return `null`.
+Update config fixtures to use two absolute `directory` values. Add named tests for duplicate normalized directories, relative paths, Windows case/trailing-separator matching, and duplicate project IDs. Add V2 event fixtures shaped `{ id, type, data, location }` and cover `session.idle`, `permission.asked`, and SDK-typed `session.execution.failed`; assert exact category, summary, session, project, and stable namespaced ID. Assert unknown/malformed events, absent IDs, absent session IDs, and unconfigured/missing locations return `null`.
 
 - [x] **Step 2: Run the focused tests and verify the expected RED**
 
-Run: `npm test -- --run tests/config.test.ts tests/events.test.ts`
+Run: `npm test -- --run tests/config.test.ts tests/events.test.ts tests/project-paths.test.ts`
 Expected: FAIL because the current config requires `baseURL` and the normalizer expects V1 `properties` instead of V2 `data`/`location`.
 
 - [x] **Step 3: Implement project path normalization and V2 config/event mapping**
 
-Add `normalizeProjectDirectory`; reject non-absolute and duplicate normalized directories. Replace `ProjectConfig.baseURL` with `directory`. Parse only the V2 event envelope fields needed by the bridge. Map `session.idle` → `turn-ended`, `permission.asked` and `permission.v2.asked` → `waiting-for-input`, and `session.error` → `error`, only when the V2 event has a configured directory and a nonempty `data.sessionID`. Require a nonempty upstream `event.id`; namespace it with the matched project ID. Do not generate a random fallback for malformed V2 IDs.
+Add `normalizeProjectDirectory`; reject non-absolute and duplicate normalized directories. Replace `ProjectConfig.baseURL` with `directory`. Parse only the V2 event envelope fields needed by the bridge. Map `session.idle` → `turn-ended`, `permission.asked` → `waiting-for-input`, and `session.execution.failed` → `error`, only when the V2 event has a configured directory and a nonempty `data.sessionID`. Require a nonempty upstream `event.id`; namespace it with the matched project ID. Do not generate a random fallback for malformed V2 IDs.
 
 - [x] **Step 4: Run focused config/event tests and typecheck**
 
-Run: `npm test -- --run tests/config.test.ts tests/events.test.ts`
+Run: `npm test -- --run tests/config.test.ts tests/events.test.ts tests/project-paths.test.ts`
 Expected: PASS for all V2 routing, mapping, path, and malformed-input cases.
 
 Run: `npm run typecheck`
@@ -112,7 +113,7 @@ Change the injected/default startup path to create one `OpenCodeMonitor(config.p
 
 - [x] **Step 9: Run focused tests, full verification, and dependency checks**
 
-Run: `npm test -- --run tests/config.test.ts tests/events.test.ts tests/opencode-monitor.test.ts tests/cli.test.ts`
+Run: `npm test -- --run tests/config.test.ts tests/events.test.ts tests/project-paths.test.ts tests/opencode-monitor.test.ts tests/cli.test.ts`
 Expected: all focused tests pass.
 
 Run: `npm test -- --run`

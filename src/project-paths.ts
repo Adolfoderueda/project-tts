@@ -8,7 +8,8 @@ export function normalizeProjectDirectory(directory: string, platform: NodeJS.Pl
 
   const normalized = pathApi.normalize(directory);
   const root = pathApi.parse(normalized).root;
-  const withoutTrailingSeparators = normalized.replace(/[\\/]+$/u, '');
+  const trailingSeparators = platform === 'win32' ? /[\\/]+$/u : /\/+$/u;
+  const withoutTrailingSeparators = normalized.replace(trailingSeparators, '');
   const result = withoutTrailingSeparators.length < root.length ? root : withoutTrailingSeparators;
 
   return platform === 'win32' ? result.toLowerCase() : result;

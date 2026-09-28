@@ -1,8 +1,12 @@
 import { mkdtemp, writeFile } from 'node:fs/promises';
-import { join } from 'node:path';
+import { join, sep } from 'node:path';
 import { tmpdir } from 'node:os';
 import { describe, expect, test } from 'vitest';
 import { ConfigError, loadConfig } from '../src/config.js';
+
+const projectRoot = join(tmpdir(), 'project-tts-config-projects');
+const alphaDirectory = join(projectRoot, 'alpha');
+const betaDirectory = join(projectRoot, 'beta');
 
 async function writeConfig(contents: unknown): Promise<string> {
   const dir = await mkdtemp(join(tmpdir(), 'project-tts-config-'));
@@ -16,16 +20,16 @@ describe('loadConfig', () => {
     const path = await writeConfig({
       databasePath: './bridge.sqlite',
       projects: [
-        { id: 'alpha', name: 'Alpha', directory: 'C:\\Projects\\alpha' },
-        { id: 'beta', name: 'Beta', directory: 'D:\\Work\\beta' },
+        { id: 'alpha', name: 'Alpha', directory: alphaDirectory },
+        { id: 'beta', name: 'Beta', directory: betaDirectory },
       ],
     });
 
     expect(loadConfig(path)).toEqual({
       databasePath: './bridge.sqlite',
       projects: [
-        { id: 'alpha', name: 'Alpha', directory: 'C:\\Projects\\alpha' },
-        { id: 'beta', name: 'Beta', directory: 'D:\\Work\\beta' },
+        { id: 'alpha', name: 'Alpha', directory: alphaDirectory },
+        { id: 'beta', name: 'Beta', directory: betaDirectory },
       ],
     });
   });
@@ -34,8 +38,8 @@ describe('loadConfig', () => {
     const path = await writeConfig({
       databasePath: './bridge.sqlite',
       projects: [
-        { id: 'alpha', name: 'Alpha', directory: 'C:\\Projects\\Alpha\\' },
-        { id: 'beta', name: 'Beta', directory: 'c:/projects/alpha' },
+        { id: 'alpha', name: 'Alpha', directory: `${alphaDirectory}${sep}` },
+        { id: 'beta', name: 'Beta', directory: join(projectRoot, 'child', '..', 'alpha') },
       ],
     });
 
@@ -43,14 +47,14 @@ describe('loadConfig', () => {
   });
 
   test.each([
-    ['missing project id', { databasePath: './bridge.sqlite', projects: [{ name: 'Alpha', directory: 'C:\\Projects\\alpha' }] }],
+    ['missing project id', { databasePath: './bridge.sqlite', projects: [{ name: 'Alpha', directory: alphaDirectory }] }],
     [
       'duplicate project ids',
       {
         databasePath: './bridge.sqlite',
         projects: [
-          { id: 'alpha', name: 'Alpha', directory: 'C:\\Projects\\alpha' },
-          { id: 'alpha', name: 'Other Alpha', directory: 'D:\\Projects\\alpha' },
+          { id: 'alpha', name: 'Alpha', directory: alphaDirectory },
+          { id: 'alpha', name: 'Other Alpha', directory: betaDirectory },
         ],
       },
     ],

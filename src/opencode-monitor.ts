@@ -12,6 +12,7 @@ export interface MonitorClient {
 }
 
 type Sleep = (milliseconds: number, signal?: AbortSignal) => Promise<void>;
+type Now = () => number;
 type Logger = Pick<typeof console, 'warn'>;
 
 export type CreateMonitorClient = () => Promise<MonitorClient>;
@@ -19,10 +20,12 @@ export type CreateMonitorClient = () => Promise<MonitorClient>;
 interface OpenCodeMonitorOptions {
   createMonitorClient?: CreateMonitorClient;
   sleep?: Sleep;
+  now?: Now;
   logger?: Logger;
 }
 
 const reconnectDelaysMs = [1_000, 2_000, 4_000, 8_000, 16_000, 30_000] as const;
+const healthyStreamResetMs = 60_000;
 const streamGapWarning = 'OpenCode V2 event stream disconnected; events during this outage may have been missed because V2 does not replay events.';
 const serviceUnavailableWarning = 'OpenCode V2 service is unavailable; ensure the OpenCode background service is running before the bridge retries.';
 
@@ -100,6 +103,7 @@ export class OpenCodeMonitor {
   readonly #store: EventStore;
   readonly #createMonitorClient: CreateMonitorClient;
   readonly #sleep: Sleep;
+  readonly #now: Now;
   readonly #logger: Logger;
 
   constructor(projects: readonly ProjectConfig[], store: EventStore, options: OpenCodeMonitorOptions = {}) {
@@ -107,6 +111,7 @@ export class OpenCodeMonitor {
     this.#store = store;
     this.#createMonitorClient = options.createMonitorClient ?? createMonitorClient;
     this.#sleep = options.sleep ?? defaultSleep;
+    this.#now = options.now ?? Date.now;
     this.#logger = options.logger ?? console;
   }
 
@@ -127,6 +132,7 @@ export class OpenCodeMonitor {
         continue;
       }
 
+      const streamStartedAt = this.#now();
       try {
         const stream = client.event.subscribe({ signal });
         for await (const event of stream) {
@@ -158,6 +164,10 @@ export class OpenCodeMonitor {
         }
 
         this.#logger.warn(streamGapWarning);
+      }
+
+      if (!signal.aborted && this.#now() - streamStartedAt >= healthyStreamResetMs) {
+        failureCount = 0;
       }
 
       if (signal.aborted) {
