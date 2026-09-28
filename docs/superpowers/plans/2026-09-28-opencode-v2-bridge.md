@@ -138,7 +138,7 @@ Confirm `node_modules/`, `dist/`, local databases, real config, and credentials 
 - Consumes: Task 1 V2 config, global monitor, and `project-voice-bridge start/events` commands.
 - Produces: verified manual evidence or a precise environment limitation.
 
-- [ ] **Step 1: Confirm the V2 service and prepare a local-only test config**
+- [x] **Step 1: Confirm the V2 service and prepare a local-only test config**
 
 Use `opencode service status` and `opencode api get /api/info` to confirm a healthy V2 service. Use a temporary config/database outside the repository and configure only a test project directory. Do not include service credentials in the config.
 
@@ -150,7 +150,7 @@ Start the bridge and verify it subscribes to the V2 stream. Use a naturally occu
 
 Confirm the real event appears once with the expected V2 type, project ID, and session ID. Restart the bridge and confirm the stored inbox record persists. Verify Ctrl+C stops the stream and closes the database. If safely possible, interrupt only the bridge subscription, confirm it reconnects, and verify its warning clearly states that events during the gap may have been missed.
 
-- [ ] **Step 4: Record smoke results and remaining limitations**
+- [x] **Step 4: Record smoke results and remaining limitations**
 
 Record the commands/results, whether a real turn-end and permission event were observed, whether a model prompt required additional approval, and any remaining Windows signal-delivery limitation. Do not claim an event category was smoke-tested unless a real event was captured.
 
