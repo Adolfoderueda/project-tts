@@ -28,7 +28,7 @@ The V2 event stream is live-only: events that occur while the bridge is disconne
 
 ## Local Spanish voice service (manual setup)
 
-Install and start Docker Desktop with WSL2 and NVIDIA GPU support. On this Windows machine, if `docker` is not on PATH, add `C:\Program Files\Docker\Docker\resources\bin` to PATH (or reinstall Docker Desktop). Check `docker compose version` before starting. Speaches is pinned by image digest in `deploy/compose.voice.yaml`; do not replace it with a moving upstream Compose download. Docker must be running before issuing these commands from the repository root in PowerShell:
+Install and start Docker Desktop with WSL2 and NVIDIA GPU support. On this Windows machine the verified Docker CLI directory is `$env:LOCALAPPDATA\Programs\DockerDesktop\resources\bin`. If `docker` is not on PATH, add that directory for the current PowerShell session with `$env:PATH = "$env:LOCALAPPDATA\Programs\DockerDesktop\resources\bin;$env:PATH"` (some Docker Desktop installs instead use `C:\Program Files\Docker\Docker\resources\bin`). Check `docker compose version` before starting. Speaches is pinned by image digest in `deploy/compose.voice.yaml`; do not replace it with a moving upstream Compose download. Docker must be running before issuing these commands from the repository root in PowerShell:
 
 ```powershell
 .\scripts\voice.ps1 start

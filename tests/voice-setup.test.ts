@@ -27,4 +27,9 @@ describe('manually managed local voice service', () => {
     expect(script).toContain('was not found after installation');
     expect(script).not.toMatch(/large-v3|small\.en|latest-cuda|Start-Job|Register-ScheduledTask/);
   });
+
+  it('documents the verified Docker Desktop CLI location on this PC', () => {
+    const readme = read('README.md');
+    expect(readme).toContain('$env:LOCALAPPDATA\\Programs\\DockerDesktop\\resources\\bin');
+  });
 });
