@@ -19,6 +19,8 @@ function captureWritable() {
       callback();
     },
   });
+  // Explicit test adapter for reply: production checks that both streams are TTYs.
+  Object.assign(stream, { isTTY: true });
 
   return {
     stream,
@@ -36,7 +38,7 @@ describe('cli', () => {
     const sends: string[] = [];
     const stdout = captureWritable();
     const stderr = captureWritable();
-    const input = new PassThrough();
+    const input = interactiveInput();
     const dependencies: CliDependencies = {
       createStore: path => {
         const store = new EventStore(path);
@@ -61,7 +63,7 @@ describe('cli', () => {
     expect(closes).toBe(1);
     expect(stderr.output()).toBe('');
 
-    const cancelledInput = new PassThrough();
+    const cancelledInput = interactiveInput();
     const cancelled = main(['reply', '--config', config, '--event-id', 'event-0', '--audio', 'recording.wav'],
       { stdout: captureWritable().stream, stderr: stderr.stream, stdin: cancelledInput }, dependencies);
     cancelledInput.end();
@@ -69,7 +71,6 @@ describe('cli', () => {
     expect(sends).toHaveLength(1);
     expect(closes).toBe(2);
   });
-
   test('reply fails closed for unknown event, bad session and send failure without exposing raw errors', async () => {
     const directory = await mkdtemp(join(tmpdir(), 'project-voice-bridge-cli-'));
     const db = join(directory, 'events.sqlite');
@@ -87,14 +88,14 @@ describe('cli', () => {
       createReply: () => ({ verify: async project => { if (failVerify) throw new Error('Bearer secret-token'); return { project, sessionId: 'session-0' }; }, send: async () => { sends++; throw new Error('Bearer secret-token'); } }),
       createMonitor: () => { throw new Error('not used'); }, onSigint: () => () => undefined,
     };
-    const io = { stdout: captureWritable().stream, stderr: stderr.stream, stdin: new PassThrough() };
+    const io = { stdout: captureWritable().stream, stderr: stderr.stream, stdin: interactiveInput() };
     expect(await main(['reply', '--config', config, '--event-id', 'unknown', '--audio', 'recording.wav'], io, dependencies)).toBe(1);
     expect(transcriptions).toBe(0);
     failVerify = true;
     expect(await main(['reply', '--config', config, '--event-id', 'event-0', '--audio', 'recording.wav'], io, dependencies)).toBe(1);
     expect(sends).toBe(0);
     failVerify = false;
-    const input = new PassThrough();
+    const input = interactiveInput();
     const output = captureWritable();
     const failure = main(['reply', '--config', config, '--event-id', 'event-0', '--audio', 'recording.wav'], { ...io, stdout: output.stream, stdin: input }, dependencies);
     await waitForOutput(output, 'Enter replacement');
@@ -118,7 +119,7 @@ describe('cli', () => {
     const stderr = captureWritable();
     const output = captureWritable();
     const code = await main(['reply', '--config', config, '--event-id', 'event-0', '--audio', 'missing.wav'],
-      { stdout: output.stream, stderr: stderr.stream, stdin: new PassThrough() }, {
+      { stdout: output.stream, stderr: stderr.stream, stdin: interactiveInput() }, {
         createStore: path => { const store = new EventStore(path); return { get: store.get.bind(store), close: () => { closes++; store.close(); } } as EventStore; },
         createVoice: () => ({ synthesize: async () => new Uint8Array() }),
         createTranscriber: () => ({ transcribe: async () => { throw new Error('Local transcription service returned an empty transcript.'); } }),
@@ -136,6 +137,21 @@ describe('cli', () => {
     const stderr = captureWritable();
     expect(await main(['reply', ...args], { stdout: captureWritable().stream, stderr: stderr.stream })).toBe(2);
     expect(stderr.output()).toContain('Usage:');
+  });
+  test('reply refuses piped input even if it contains yes', async () => {
+    const input = new PassThrough();
+    input.end('yes\n');
+    const stderr = captureWritable();
+    expect(await main(['reply', '--config', 'unused.json', '--event-id', 'id', '--audio', 'audio.wav'],
+      { stdout: captureWritable().stream, stderr: stderr.stream, stdin: input })).toBe(1);
+    expect(stderr.output()).toContain('interactive terminal');
+  });
+  test('reply refuses redirected output even with interactive input', async () => {
+    const stdout = new Writable({ write(_chunk, _encoding, callback) { callback(); } });
+    const stderr = captureWritable();
+    expect(await main(['reply', '--config', 'unused.json', '--event-id', 'id', '--audio', 'audio.wav'],
+      { stdout, stderr: stderr.stream, stdin: interactiveInput() })).toBe(1);
+    expect(stderr.output()).toContain('interactive terminal');
   });
   test('speak selects exact event and project, writes WAV, and closes store', async () => {
     const directory = await mkdtemp(join(tmpdir(), 'project-voice-bridge-cli-'));
@@ -399,4 +415,9 @@ async function waitForOutput(output: { output(): string }, text: string): Promis
     await new Promise(resolve => setImmediate(resolve));
   }
   throw new Error(`Prompt did not display ${text}`);
+}
+
+function interactiveInput(): PassThrough {
+  const input = new PassThrough();
+  return Object.assign(input, { isTTY: true, setRawMode: () => input });
 }

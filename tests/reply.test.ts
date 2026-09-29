@@ -46,8 +46,9 @@ describe('replyToEvent', () => {
 });
 
 describe('LineTerminalPrompt', () => {
-  function terminal() {
+  function terminal(interactive = true) {
     const input = new PassThrough();
+    if (interactive) Object.assign(input, { isTTY: true, setRawMode: () => input });
     const output = new PassThrough();
     let printed = '';
     output.on('data', chunk => { printed += chunk.toString(); });
@@ -114,4 +115,34 @@ describe('LineTerminalPrompt', () => {
     expect(await response).toBe(false);
     prompt.close();
   });
+
+  test.each(['yes', 'yes\n'])('EOF with final %j never sends', async finalChunk => {
+    const { input, prompt, printed } = terminal();
+    const send = vi.fn(async () => undefined);
+    const run = replyToEvent(event, project, 'recording.wav', { transcribe: async () => 'original' },
+      { verify: async () => destination, send }, prompt);
+    await waitForText(printed, 'Enter replacement');
+    input.write('\n');
+    await waitForText(printed, 'Type yes exactly');
+    input.end(finalChunk);
+    expect(await run).toBe('cancelled');
+    expect(send).not.toHaveBeenCalled();
+    prompt.close();
+  });
+
+  test('non-interactive input cannot approve a send even with a standalone yes line', async () => {
+    const { input, prompt } = terminal(false);
+    const confirmation = prompt.confirm(destination, 'final');
+    input.write('yes\n');
+    expect(await confirmation).toBe(false);
+    prompt.close();
+  });
 });
+
+async function waitForText(getText: () => string, expected: string): Promise<void> {
+  for (let attempt = 0; attempt < 100; attempt += 1) {
+    if (getText().includes(expected)) return;
+    await new Promise(resolve => setImmediate(resolve));
+  }
+  throw new Error(`Prompt did not display ${expected}`);
+}

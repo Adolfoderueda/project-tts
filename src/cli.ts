@@ -199,6 +199,12 @@ async function runReply(args: string[], io: CliIo, dependencies: CliDependencies
     writeUsage(io);
     return 2;
   }
+  const input = io.stdin ?? process.stdin;
+  if ((input as NodeJS.ReadableStream & { isTTY?: boolean }).isTTY !== true ||
+    (io.stdout as NodeJS.WritableStream & { isTTY?: boolean }).isTTY !== true) {
+    io.stderr.write('Reply requires an interactive terminal for input and output; piped input cannot confirm a send.\n');
+    return 1;
+  }
   let store: EventStore | undefined;
   let prompt: LineTerminalPrompt | undefined;
   try {
@@ -207,7 +213,7 @@ async function runReply(args: string[], io: CliIo, dependencies: CliDependencies
     const { event, project } = selectEvent(store, config.projects, parsed.eventId);
     const voice = dependencies.createTranscriber?.() ?? new VoiceClient();
     const opencode = dependencies.createReply?.() ?? new OpenCodeReply();
-    prompt = new LineTerminalPrompt(io.stdin ?? process.stdin, io.stdout, event);
+    prompt = new LineTerminalPrompt(input, io.stdout, event);
     const result = await replyToEvent(event, project, parsed.audioPath, voice, opencode, prompt);
     if (result === 'cancelled') {
       io.stdout.write('Reply cancelled; nothing sent.\n');

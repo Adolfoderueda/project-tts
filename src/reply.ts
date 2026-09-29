@@ -33,6 +33,7 @@ export class LineTerminalPrompt implements TerminalPrompt {
   readonly #readline: Interface;
   readonly #output: NodeJS.WritableStream;
   readonly #input: NodeJS.ReadableStream;
+  readonly #interactive: boolean;
   readonly #onData: (chunk: unknown) => void;
   readonly #lines: string[] = [];
   #pending: ((value: string | null) => void) | undefined;
@@ -40,6 +41,7 @@ export class LineTerminalPrompt implements TerminalPrompt {
 
   constructor(input: NodeJS.ReadableStream, output: NodeJS.WritableStream, private readonly event: CapturedEvent) {
     this.#input = input;
+    this.#interactive = (input as NodeJS.ReadableStream & { isTTY?: boolean }).isTTY === true;
     this.#output = output;
     // Observe interrupts before readline can interpret a line in the same chunk.
     this.#onData = chunk => { if (String(chunk).includes('\x03')) this.close(); };
@@ -76,7 +78,12 @@ export class LineTerminalPrompt implements TerminalPrompt {
   async confirm(destination: VerifiedDestination, text: string): Promise<boolean> {
     this.#lines.length = 0;
     this.#output.write(`\nVerified destination:\nProject: ${destination.project.name} (${destination.project.id})\nSession: ${destination.sessionId}\nEvent: ${this.event.id} (${this.event.kind}) — ${this.event.summary}\nFinal text:\n${text}\nSend to this session? Type yes exactly: `);
-    return await this.#readLine() === 'yes';
+    if (!this.#interactive) return false;
+    const answer = await this.#readLine();
+    // readline may deliver an unterminated last line during EOF, or a line
+    // followed immediately by EOF/Ctrl+C. Let stream closure win over yes.
+    await new Promise<void>(resolve => setImmediate(resolve));
+    return !this.#closed && answer === 'yes';
   }
 
   close(): void {
