@@ -82,4 +82,21 @@ describe('EventStore', () => {
     expect(store.list(10)).toEqual([secondProject, firstProject]);
     store.close();
   });
+
+  test('gets only the exact event ID when session IDs are shared', async () => {
+    const store = new EventStore(await createDatabasePath());
+    try {
+      const first = capturedEvent({ id: 'event-first', sessionId: 'shared-session' });
+      const second = capturedEvent({ id: 'event-second', sessionId: 'shared-session', summary: 'Later turn' });
+      store.insert(first);
+      store.insert(second);
+
+      expect(store.get('event-first')).toEqual(first);
+      expect(store.get('event-second')).toEqual(second);
+      expect(store.get('shared-session')).toBeUndefined();
+      expect(store.get('unknown-event')).toBeUndefined();
+    } finally {
+      store.close();
+    }
+  });
 });

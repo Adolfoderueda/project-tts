@@ -12,6 +12,19 @@ type EventRow = {
   raw_event_type: string;
 };
 
+function toCapturedEvent(row: EventRow): CapturedEvent {
+  return {
+    id: row.id,
+    projectId: row.project_id,
+    projectName: row.project_name,
+    sessionId: row.session_id,
+    kind: row.kind,
+    occurredAt: row.occurred_at,
+    summary: row.summary,
+    rawEventType: row.raw_event_type,
+  };
+}
+
 export class EventStore {
   readonly #database: Database.Database;
 
@@ -57,6 +70,13 @@ export class EventStore {
       );
   }
 
+  get(id: string): CapturedEvent | undefined {
+    const row = this.#database
+      .prepare('SELECT id, project_id, project_name, session_id, kind, occurred_at, summary, raw_event_type FROM events WHERE id = ?')
+      .get(id) as EventRow | undefined;
+    return row === undefined ? undefined : toCapturedEvent(row);
+  }
+
   list(limit: number): CapturedEvent[] {
     const rows = this.#database
       .prepare(`
@@ -75,16 +95,7 @@ export class EventStore {
       `)
       .all(limit) as EventRow[];
 
-    return rows.map((row) => ({
-      id: row.id,
-      projectId: row.project_id,
-      projectName: row.project_name,
-      sessionId: row.session_id,
-      kind: row.kind,
-      occurredAt: row.occurred_at,
-      summary: row.summary,
-      rawEventType: row.raw_event_type,
-    }));
+    return rows.map(toCapturedEvent);
   }
 
   close(): void {

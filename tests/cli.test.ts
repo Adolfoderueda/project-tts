@@ -71,6 +71,7 @@ describe('cli', () => {
     expect(stdout.output()).toContain('2026-01-01T00:00:00.000Z');
     expect(stdout.output()).toContain('Demo Project');
     expect(stdout.output()).toContain('session-0');
+    expect(stdout.output()).toMatch(/event-0\t.*session-0/);
     expect(stdout.output()).toContain('turn-ended');
     expect(stdout.output()).toContain('OpenCode turn finished 0');
   });

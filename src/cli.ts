@@ -109,7 +109,7 @@ async function runEvents(args: string[], io: CliIo, dependencies: CliDependencie
       io.stdout.write(`${JSON.stringify(events, null, 2)}\n`);
     } else {
       for (const event of events) {
-        io.stdout.write(`${event.occurredAt}\t${event.projectName}\t${event.sessionId}\t${event.kind}\t${event.summary}\n`);
+        io.stdout.write(`${event.occurredAt}\t${event.projectName}\t${event.id}\t${event.sessionId}\t${event.kind}\t${event.summary}\n`);
       }
     }
 
