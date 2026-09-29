@@ -25,17 +25,19 @@ export async function speakEvent(event: CapturedEvent, outputPath: string, voice
   if (!isWav(bytes) || bytes.byteLength > 20 * 1024 * 1024) throw new Error('Invalid WAV audio from local speech service.');
 
   const handle = await open(outputPath, 'wx');
+  let created: Awaited<ReturnType<typeof handle.stat>> | undefined;
   try {
+    created = await handle.stat();
     await handle.writeFile(bytes);
+    await handle.close();
   } catch (error) {
     // Only remove the path if it still points to this file; never remove a replacement.
-    const created = await handle.stat().catch(() => null);
-    await handle.close();
+    created ??= await handle.stat().catch(() => undefined);
+    await handle.close().catch(() => undefined);
     const current = await stat(outputPath).catch(() => null);
     if (created && current && created.ino === current.ino && created.dev === current.dev) {
       await unlink(outputPath).catch(() => undefined);
     }
     throw error;
   }
-  await handle.close();
 }

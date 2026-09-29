@@ -78,4 +78,22 @@ describe('speakEvent', () => {
       spy.mockRestore();
     }
   });
+
+  test('removes the newly created file when close fails after writing', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'speak-'));
+    const path = join(directory, 'status.wav');
+    const originalOpen = (await vi.importActual<typeof import('node:fs/promises')>('node:fs/promises')).open;
+    const spy = vi.mocked(fs.open).mockImplementation(async (...args: Parameters<typeof fs.open>) => {
+      const handle = await originalOpen(...args);
+      const originalClose = handle.close.bind(handle);
+      handle.close = async () => { await originalClose(); throw new Error('close failed'); };
+      return handle;
+    });
+    try {
+      await expect(speakEvent(event, path, { synthesize: async () => wav })).rejects.toThrow('close failed');
+      await expect(readFile(path)).rejects.toMatchObject({ code: 'ENOENT' });
+    } finally {
+      spy.mockRestore();
+    }
+  });
 });
