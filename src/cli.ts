@@ -3,6 +3,9 @@ import { fileURLToPath } from 'node:url';
 import { loadConfig, type ProjectConfig } from './config.js';
 import { EventStore } from './store.js';
 import { OpenCodeMonitor } from './opencode-monitor.js';
+import { selectEvent } from './event-selection.js';
+import { VoiceClient } from './voice-client.js';
+import { speakEvent } from './speak.js';
 
 export interface CliIo {
   stdout: NodeJS.WritableStream;
@@ -12,6 +15,7 @@ export interface CliIo {
 export interface CliDependencies {
   createStore(path: string): EventStore;
   createMonitor(projects: readonly ProjectConfig[], store: EventStore): Pick<OpenCodeMonitor, 'run'>;
+  createVoice(): Pick<VoiceClient, 'synthesize'>;
   onSigint(handler: () => void): () => void;
 }
 
@@ -20,11 +24,13 @@ const usage = `Usage: project-voice-bridge <command>
 Commands:
   start --config <path>
   events --config <path> [--limit <positive-integer>] [--json]
+  speak --config <path> --event-id <id> --output <wav>
 `;
 
 const defaultDependencies: CliDependencies = {
   createStore: (path) => new EventStore(path),
   createMonitor: (projects, store) => new OpenCodeMonitor(projects, store),
+  createVoice: () => new VoiceClient(),
   onSigint: (handler) => {
     process.on('SIGINT', handler);
     return () => {
@@ -81,6 +87,18 @@ function parseStartArgs(args: string[]): Pick<ParsedArgs, 'configPath'> | null {
   return { configPath: args[1] };
 }
 
+function parseSpeakArgs(args: string[]): { configPath: string; eventId: string; outputPath: string } | null {
+  const values = new Map<string, string>();
+  for (let index = 0; index < args.length; index += 2) {
+    const key = args[index];
+    const value = args[index + 1];
+    if (!['--config', '--event-id', '--output'].includes(key ?? '') || values.has(key) || !value || value.startsWith('--')) return null;
+    values.set(key, value);
+  }
+  if (values.size !== 3) return null;
+  return { configPath: values.get('--config')!, eventId: values.get('--event-id')!, outputPath: values.get('--output')! };
+}
+
 function writeUsage(io: CliIo): void {
   io.stderr.write(usage);
 }
@@ -113,6 +131,28 @@ async function runEvents(args: string[], io: CliIo, dependencies: CliDependencie
       }
     }
 
+    return 0;
+  } catch (error) {
+    io.stderr.write(`${conciseDiagnostic(error)}\n`);
+    return 1;
+  } finally {
+    store?.close();
+  }
+}
+
+async function runSpeak(args: string[], io: CliIo, dependencies: CliDependencies): Promise<number> {
+  const parsed = parseSpeakArgs(args);
+  if (parsed === null) {
+    writeUsage(io);
+    return 2;
+  }
+  let store: EventStore | undefined;
+  try {
+    const config = loadConfig(parsed.configPath);
+    store = dependencies.createStore(config.databasePath);
+    const { event } = selectEvent(store, config.projects, parsed.eventId);
+    await speakEvent(event, parsed.outputPath, dependencies.createVoice());
+    io.stdout.write(`WAV written to ${parsed.outputPath}\n`);
     return 0;
   } catch (error) {
     io.stderr.write(`${conciseDiagnostic(error)}\n`);
@@ -171,6 +211,9 @@ export async function main(
   const [command, ...args] = argv;
   if (command === 'events') {
     return runEvents(args, io, dependencies);
+  }
+  if (command === 'speak') {
+    return runSpeak(args, io, dependencies);
   }
   if (command === 'start') {
     return runStart(args, io, dependencies);

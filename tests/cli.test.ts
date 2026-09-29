@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'vitest';
 import { Writable } from 'node:stream';
-import { mkdtemp, writeFile } from 'node:fs/promises';
+import { mkdtemp, readFile, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { main, type CliDependencies } from '../src/cli.js';
@@ -27,6 +27,66 @@ function captureWritable() {
 }
 
 describe('cli', () => {
+  test('speak selects exact event and project, writes WAV, and closes store', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'project-voice-bridge-cli-'));
+    const db = join(directory, 'events.sqlite');
+    const config = await writeConfig(directory, db);
+    seedEvents(db, 2);
+    const output = join(directory, 'spoken.wav');
+    const stdout = captureWritable();
+    const stderr = captureWritable();
+    const spoken: string[] = [];
+    let closes = 0;
+    const wav = Uint8Array.from([...Buffer.from('RIFF'), 0, 0, 0, 0, ...Buffer.from('WAVE'), 0]);
+    const exitCode = await main(['speak', '--config', config, '--event-id', 'event-0', '--output', output],
+      { stdout: stdout.stream, stderr: stderr.stream }, {
+        createStore: (path) => {
+          const store = new EventStore(path);
+          return { get: store.get.bind(store), close: () => { closes++; store.close(); } } as EventStore;
+        },
+        createVoice: () => ({ synthesize: async (text: string) => { spoken.push(text); return wav; } }),
+        createMonitor: () => { throw new Error('not used'); },
+        onSigint: () => () => undefined,
+      });
+    expect(exitCode).toBe(0);
+    expect(closes).toBe(1);
+    expect(spoken).toHaveLength(1);
+    expect(spoken[0]).toContain('Demo Project');
+    expect(stdout.output()).toContain(output);
+    expect(stderr.output()).toBe('');
+    expect(await readFile(output)).toEqual(Buffer.from(wav));
+  });
+
+  test.each(['missing', 'wrong-project'])('speak fails closed for %s and closes store', async (scenario) => {
+    const directory = await mkdtemp(join(tmpdir(), 'project-voice-bridge-cli-'));
+    const db = join(directory, 'events.sqlite');
+    const config = await writeConfig(directory, db);
+    seedEvents(db, 1);
+    let closes = 0;
+    let calls = 0;
+    const stderr = captureWritable();
+    const code = await main(['speak', '--config', config, '--event-id', scenario === 'missing' ? 'unknown' : 'event-0', '--output', join(directory, 'out.wav')],
+      { stdout: captureWritable().stream, stderr: stderr.stream }, {
+        createStore: (path) => {
+          const store = new EventStore(path);
+          return { get: (id: string) => scenario === 'wrong-project' ? { ...store.get(id)!, projectId: 'other' } : store.get(id), close: () => { closes++; store.close(); } } as EventStore;
+        },
+        createVoice: () => ({ synthesize: async () => { calls++; return new Uint8Array(); } }),
+        createMonitor: () => { throw new Error('not used'); },
+        onSigint: () => () => undefined,
+      });
+    expect(code).toBe(1);
+    expect(closes).toBe(1);
+    expect(calls).toBe(0);
+    expect(stderr.output()).toMatch(/event|project/i);
+  });
+
+  test('speak rejects incomplete arguments with usage', async () => {
+    const stderr = captureWritable();
+    expect(await main(['speak', '--event-id', 'id'], { stdout: captureWritable().stream, stderr: stderr.stream })).toBe(2);
+    expect(stderr.output()).toContain('Usage:');
+  });
+
   test('main_returns_usage_for_missing_command', async () => {
     const stdout = captureWritable();
     const stderr = captureWritable();
@@ -208,6 +268,7 @@ function createStartDependencies(options: {
     createMonitor: (projects) => ({
       run: (signal) => options.onRun(projects, signal),
     }),
+    createVoice: () => { throw new Error('not used'); },
     onSigint: options.onSigint,
   };
 }
