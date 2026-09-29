@@ -69,6 +69,25 @@ describe('VoiceClient.transcribe', () => {
     expect(await readFile(path)).toEqual(Buffer.from(wav));
   });
 
+  test('uploads M4A bytes with MP4 MIME and original filename', async () => {
+    dir ??= await mkdtemp(join(tmpdir(), 'voice-client-'));
+    const bytes = Buffer.concat([Buffer.from([0, 0, 0, 24]), Buffer.from('ftypM4A '), Buffer.alloc(16)]);
+    const path = join(dir, 'voz-española.m4a');
+    await writeFile(path, bytes);
+    const fetch = vi.fn(async () => new Response(JSON.stringify({ text: 'Hola.' })));
+    expect(await new VoiceClient(fetch).transcribe(path)).toBe('Hola.');
+    const [url, init] = fetch.mock.calls[0] as unknown as [string, RequestInit];
+    expect(url).toBe('http://127.0.0.1:8000/v1/audio/transcriptions');
+    const body = init.body as FormData;
+    const file = body.get('file') as File;
+    expect(file.name).toBe('voz-española.m4a');
+    expect(file.type).toBe('audio/mp4');
+    expect(Buffer.from(await file.arrayBuffer())).toEqual(bytes);
+    expect(body.get('model')).toBe('Systran/faster-whisper-small');
+    expect(body.get('language')).toBe('es');
+    expect(await readFile(path)).toEqual(bytes);
+  });
+
   test('does not send invalid recordings and preserves them', async () => {
     const path = await recording(Buffer.from('not audio'));
     const fetch = vi.fn(async () => new Response('{}'));

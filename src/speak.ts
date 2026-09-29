@@ -31,7 +31,8 @@ export async function speakEvent(event: CapturedEvent, outputPath: string, voice
     await handle.writeFile(bytes);
     await handle.close();
   } catch (error) {
-    // Only remove the path if it still points to this file; never remove a replacement.
+    // Best-effort cleanup: inode check avoids known replacements, but stat/unlink
+    // are not atomic. A concurrent path replacement after stat remains possible.
     created ??= await handle.stat().catch(() => undefined);
     await handle.close().catch(() => undefined);
     const current = await stat(outputPath).catch(() => null);

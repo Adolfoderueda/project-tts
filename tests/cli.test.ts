@@ -183,6 +183,28 @@ describe('cli', () => {
     expect(await readFile(output)).toEqual(Buffer.from(wav));
   });
 
+  test('speak describes the selected event kind, not another stored event status', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'project-voice-bridge-cli-'));
+    const db = join(directory, 'events.sqlite');
+    const config = await writeConfig(directory, db);
+    seedEvents(db, 2);
+    const store = new EventStore(db);
+    store.insert({ ...store.get('event-0')!, id: 'event-waiting', kind: 'waiting-for-input', summary: 'Waiting', occurredAt: '2026-01-02T00:00:00.000Z' });
+    store.close();
+    const spoken: string[] = [];
+    const wav = Uint8Array.from([...Buffer.from('RIFF'), 0, 0, 0, 0, ...Buffer.from('WAVE'), 0]);
+    expect(await main(['speak', '--config', config, '--event-id', 'event-waiting', '--output', join(directory, 'waiting.wav')],
+      { stdout: captureWritable().stream, stderr: captureWritable().stream }, {
+        createVoice: () => ({ synthesize: async text => { spoken.push(text); return wav; } }),
+        createStore: path => new EventStore(path),
+        createMonitor: () => { throw new Error('not used'); },
+        onSigint: () => () => undefined,
+      })).toBe(0);
+    expect(spoken).toHaveLength(1);
+    expect(spoken[0]).toMatch(/esperando/i);
+    expect(spoken[0]).not.toMatch(/terminó su turno/i);
+  });
+
   test.each(['missing', 'wrong-project'])('speak fails closed for %s and closes store', async (scenario) => {
     const directory = await mkdtemp(join(tmpdir(), 'project-voice-bridge-cli-'));
     const db = join(directory, 'events.sqlite');
