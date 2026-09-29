@@ -6,16 +6,21 @@ import { OpenCodeMonitor } from './opencode-monitor.js';
 import { selectEvent } from './event-selection.js';
 import { VoiceClient } from './voice-client.js';
 import { speakEvent } from './speak.js';
+import { OpenCodeReply } from './opencode-reply.js';
+import { LineTerminalPrompt, replyToEvent } from './reply.js';
 
 export interface CliIo {
   stdout: NodeJS.WritableStream;
   stderr: NodeJS.WritableStream;
+  stdin?: NodeJS.ReadableStream;
 }
 
 export interface CliDependencies {
   createStore(path: string): EventStore;
   createMonitor(projects: readonly ProjectConfig[], store: EventStore): Pick<OpenCodeMonitor, 'run'>;
   createVoice(): Pick<VoiceClient, 'synthesize'>;
+  createTranscriber?(): Pick<VoiceClient, 'transcribe'>;
+  createReply?(): Pick<OpenCodeReply, 'verify' | 'send'>;
   onSigint(handler: () => void): () => void;
 }
 
@@ -25,12 +30,15 @@ Commands:
   start --config <path>
   events --config <path> [--limit <positive-integer>] [--json]
   speak --config <path> --event-id <id> --output <wav>
+  reply --config <path> --event-id <id> --audio <file>
 `;
 
 const defaultDependencies: CliDependencies = {
   createStore: (path) => new EventStore(path),
   createMonitor: (projects, store) => new OpenCodeMonitor(projects, store),
   createVoice: () => new VoiceClient(),
+  createTranscriber: () => new VoiceClient(),
+  createReply: () => new OpenCodeReply(),
   onSigint: (handler) => {
     process.on('SIGINT', handler);
     return () => {
@@ -99,6 +107,18 @@ function parseSpeakArgs(args: string[]): { configPath: string; eventId: string; 
   return { configPath: values.get('--config')!, eventId: values.get('--event-id')!, outputPath: values.get('--output')! };
 }
 
+function parseReplyArgs(args: string[]): { configPath: string; eventId: string; audioPath: string } | null {
+  const values = new Map<string, string>();
+  for (let index = 0; index < args.length; index += 2) {
+    const key = args[index];
+    const value = args[index + 1];
+    if (!['--config', '--event-id', '--audio'].includes(key ?? '') || values.has(key) || !value || value.startsWith('--')) return null;
+    values.set(key, value);
+  }
+  if (values.size !== 3) return null;
+  return { configPath: values.get('--config')!, eventId: values.get('--event-id')!, audioPath: values.get('--audio')! };
+}
+
 function writeUsage(io: CliIo): void {
   io.stderr.write(usage);
 }
@@ -140,6 +160,17 @@ async function runEvents(args: string[], io: CliIo, dependencies: CliDependencie
   }
 }
 
+function safeReplyDiagnostic(error: unknown): string {
+  if (error instanceof Error) {
+    if (/^(Unknown event ID:|Configured project does not match stored event:)/.test(error.message)) return 'Selected event is missing or its configured project does not match.';
+    if (error.message === 'Audio input must be a regular file.' || error.message === 'Audio input is empty. Supply a WAV or M4A recording.' || error.message === 'Audio input must be under 25 MiB.' || error.message === 'Unsupported audio format or mismatched file signature. Supply a WAV (.wav) or M4A (.m4a) recording.') return error.message;
+    if (/^Local transcription service failed \(HTTP \d{3}\)\. Check the service and installed model\.$/.test(error.message)) return error.message;
+    if (error.message === 'Local transcription service returned invalid JSON.' || error.message === 'Local transcription service returned invalid transcript JSON.' || error.message === 'Local transcription service returned an empty transcript.' || error.message === 'Local transcription response exceeds the 1 MiB limit.') return error.message;
+    if (error.message === 'No healthy OpenCode V2 service was discovered' || /^OpenCode session (ID is missing|ID or location could not be verified|location could not be verified|location does not match the configured project)$/.test(error.message)) return 'OpenCode session could not be verified for the configured project.';
+  }
+  return 'Reply failed. If a send was attempted, delivery may be uncertain; inspect the OpenCode session before trying again. Check the selected event, local voice service, audio file, and OpenCode session.';
+}
+
 async function runSpeak(args: string[], io: CliIo, dependencies: CliDependencies): Promise<number> {
   const parsed = parseSpeakArgs(args);
   if (parsed === null) {
@@ -158,6 +189,38 @@ async function runSpeak(args: string[], io: CliIo, dependencies: CliDependencies
     io.stderr.write(`${conciseDiagnostic(error)}\n`);
     return 1;
   } finally {
+    store?.close();
+  }
+}
+
+async function runReply(args: string[], io: CliIo, dependencies: CliDependencies): Promise<number> {
+  const parsed = parseReplyArgs(args);
+  if (parsed === null) {
+    writeUsage(io);
+    return 2;
+  }
+  let store: EventStore | undefined;
+  let prompt: LineTerminalPrompt | undefined;
+  try {
+    const config = loadConfig(parsed.configPath);
+    store = dependencies.createStore(config.databasePath);
+    const { event, project } = selectEvent(store, config.projects, parsed.eventId);
+    const voice = dependencies.createTranscriber?.() ?? new VoiceClient();
+    const opencode = dependencies.createReply?.() ?? new OpenCodeReply();
+    prompt = new LineTerminalPrompt(io.stdin ?? process.stdin, io.stdout, event);
+    const result = await replyToEvent(event, project, parsed.audioPath, voice, opencode, prompt);
+    if (result === 'cancelled') {
+      io.stdout.write('Reply cancelled; nothing sent.\n');
+      return 2;
+    }
+    io.stdout.write('Reply submitted to verified session.\n');
+    return 0;
+  } catch (error) {
+    // Do not echo transport exceptions: they may include authentication headers or transcripts.
+    io.stderr.write(`${safeReplyDiagnostic(error)}\n`);
+    return 1;
+  } finally {
+    prompt?.close();
     store?.close();
   }
 }
@@ -214,6 +277,9 @@ export async function main(
   }
   if (command === 'speak') {
     return runSpeak(args, io, dependencies);
+  }
+  if (command === 'reply') {
+    return runReply(args, io, dependencies);
   }
   if (command === 'start') {
     return runStart(args, io, dependencies);

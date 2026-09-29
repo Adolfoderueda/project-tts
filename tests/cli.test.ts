@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'vitest';
-import { Writable } from 'node:stream';
+import { Writable, PassThrough } from 'node:stream';
 import { mkdtemp, readFile, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -27,6 +27,116 @@ function captureWritable() {
 }
 
 describe('cli', () => {
+  test('reply sends only after explicit yes, closes store and reports cancellation separately', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'project-voice-bridge-cli-'));
+    const db = join(directory, 'events.sqlite');
+    const config = await writeConfig(directory, db);
+    seedEvents(db, 1);
+    let closes = 0;
+    const sends: string[] = [];
+    const stdout = captureWritable();
+    const stderr = captureWritable();
+    const input = new PassThrough();
+    const dependencies: CliDependencies = {
+      createStore: path => {
+        const store = new EventStore(path);
+        return { get: store.get.bind(store), close: () => { closes++; store.close(); } } as EventStore;
+      },
+      createVoice: () => ({ synthesize: async () => new Uint8Array() }),
+      createTranscriber: () => ({ transcribe: async () => 'original' }),
+      createReply: () => ({ verify: async project => ({ project, sessionId: 'session-0' }), send: async (_destination, text) => { sends.push(text); } }),
+      createMonitor: () => { throw new Error('not used'); },
+      onSigint: () => () => undefined,
+    };
+    const run = main(['reply', '--config', config, '--event-id', 'event-0', '--audio', 'recording.wav'],
+      { stdout: stdout.stream, stderr: stderr.stream, stdin: input }, dependencies);
+    await waitForOutput(stdout, 'Enter replacement');
+    input.write('final edit\n');
+    await waitForOutput(stdout, 'Type yes exactly');
+    input.write('yes\n');
+    expect(await run).toBe(0);
+    expect(sends).toEqual(['final edit']);
+    expect(stdout.output()).toContain('session-0');
+    expect(stdout.output()).toContain('final edit');
+    expect(closes).toBe(1);
+    expect(stderr.output()).toBe('');
+
+    const cancelledInput = new PassThrough();
+    const cancelled = main(['reply', '--config', config, '--event-id', 'event-0', '--audio', 'recording.wav'],
+      { stdout: captureWritable().stream, stderr: stderr.stream, stdin: cancelledInput }, dependencies);
+    cancelledInput.end();
+    expect(await cancelled).toBe(2);
+    expect(sends).toHaveLength(1);
+    expect(closes).toBe(2);
+  });
+
+  test('reply fails closed for unknown event, bad session and send failure without exposing raw errors', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'project-voice-bridge-cli-'));
+    const db = join(directory, 'events.sqlite');
+    const config = await writeConfig(directory, db);
+    seedEvents(db, 1);
+    let closes = 0;
+    let transcriptions = 0;
+    let sends = 0;
+    let failVerify = false;
+    const stderr = captureWritable();
+    const dependencies: CliDependencies = {
+      createStore: path => { const store = new EventStore(path); return { get: store.get.bind(store), close: () => { closes++; store.close(); } } as EventStore; },
+      createVoice: () => ({ synthesize: async () => new Uint8Array() }),
+      createTranscriber: () => ({ transcribe: async () => { transcriptions++; return 'texto'; } }),
+      createReply: () => ({ verify: async project => { if (failVerify) throw new Error('Bearer secret-token'); return { project, sessionId: 'session-0' }; }, send: async () => { sends++; throw new Error('Bearer secret-token'); } }),
+      createMonitor: () => { throw new Error('not used'); }, onSigint: () => () => undefined,
+    };
+    const io = { stdout: captureWritable().stream, stderr: stderr.stream, stdin: new PassThrough() };
+    expect(await main(['reply', '--config', config, '--event-id', 'unknown', '--audio', 'recording.wav'], io, dependencies)).toBe(1);
+    expect(transcriptions).toBe(0);
+    failVerify = true;
+    expect(await main(['reply', '--config', config, '--event-id', 'event-0', '--audio', 'recording.wav'], io, dependencies)).toBe(1);
+    expect(sends).toBe(0);
+    failVerify = false;
+    const input = new PassThrough();
+    const output = captureWritable();
+    const failure = main(['reply', '--config', config, '--event-id', 'event-0', '--audio', 'recording.wav'], { ...io, stdout: output.stream, stdin: input }, dependencies);
+    await waitForOutput(output, 'Enter replacement');
+    input.write('\n');
+    await waitForOutput(output, 'Type yes exactly');
+    input.write('yes\n');
+    expect(await failure).toBe(1);
+    expect(sends).toBe(1);
+    expect(closes).toBe(3);
+    expect(stderr.output()).toContain('delivery may be uncertain');
+    expect(stderr.output()).not.toContain('secret-token');
+  });
+
+  test('reply reports local transcription failure without prompting or sending and closes store', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'project-voice-bridge-cli-'));
+    const db = join(directory, 'events.sqlite');
+    const config = await writeConfig(directory, db);
+    seedEvents(db, 1);
+    let closes = 0;
+    let sends = 0;
+    const stderr = captureWritable();
+    const output = captureWritable();
+    const code = await main(['reply', '--config', config, '--event-id', 'event-0', '--audio', 'missing.wav'],
+      { stdout: output.stream, stderr: stderr.stream, stdin: new PassThrough() }, {
+        createStore: path => { const store = new EventStore(path); return { get: store.get.bind(store), close: () => { closes++; store.close(); } } as EventStore; },
+        createVoice: () => ({ synthesize: async () => new Uint8Array() }),
+        createTranscriber: () => ({ transcribe: async () => { throw new Error('Local transcription service returned an empty transcript.'); } }),
+        createReply: () => ({ verify: async project => ({ project, sessionId: 'session-0' }), send: async () => { sends++; } }),
+        createMonitor: () => { throw new Error('not used'); }, onSigint: () => () => undefined,
+      });
+    expect(code).toBe(1);
+    expect(closes).toBe(1);
+    expect(sends).toBe(0);
+    expect(output.output()).not.toContain('Type yes exactly');
+    expect(stderr.output()).toContain('empty transcript');
+  });
+
+  test.each([{ args: ['--yes'] }, { args: ['--audio', ''] }, { args: ['--config', 'x', '--event-id', 'id'] }])('reply rejects invalid args $args', async ({ args }) => {
+    const stderr = captureWritable();
+    expect(await main(['reply', ...args], { stdout: captureWritable().stream, stderr: stderr.stream })).toBe(2);
+    expect(stderr.output()).toContain('Usage:');
+  });
   test('speak selects exact event and project, writes WAV, and closes store', async () => {
     const directory = await mkdtemp(join(tmpdir(), 'project-voice-bridge-cli-'));
     const db = join(directory, 'events.sqlite');
@@ -281,4 +391,12 @@ function waitForAbort(signal: AbortSignal): Promise<void> {
   return new Promise((resolve) => {
     signal.addEventListener('abort', () => resolve(), { once: true });
   });
+}
+
+async function waitForOutput(output: { output(): string }, text: string): Promise<void> {
+  for (let attempt = 0; attempt < 100; attempt += 1) {
+    if (output.output().includes(text)) return;
+    await new Promise(resolve => setImmediate(resolve));
+  }
+  throw new Error(`Prompt did not display ${text}`);
 }

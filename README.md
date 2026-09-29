@@ -20,11 +20,15 @@ Then run:
 project-voice-bridge start --config ./config.json
 project-voice-bridge events --config ./config.json --limit 20
 project-voice-bridge events --config ./config.json --json
+project-voice-bridge speak --config ./config.json --event-id '<id-from-events>' --output ./status.wav
+project-voice-bridge reply --config ./config.json --event-id '<id-from-events>' --audio ./recording.wav
 ```
 
 `start` subscribes once to OpenCode V2's global event stream and routes events to configured projects by directory. Captured events are written to the shared SQLite inbox. Press `Ctrl+C` to stop and close the store.
 
 The V2 event stream is live-only: events that occur while the bridge is disconnected are not replayed. The bridge warns when the stream ends or disconnects, then reconnects with backoff; events during the outage may be missed.
+
+`events` displays the exact event ID to use in `speak` or `reply` (quote IDs containing shell punctuation). `speak` writes a new local WAV file and refuses to overwrite an existing file; play the result with your local audio player. Start the voice service manually and install its models (below) before either voice command. For `reply`, supply a recording you made separately. The CLI transcribes it on localhost, displays the transcript, and lets you replace it with a single line (press Enter to keep it). It then shows the verified project, event, session ID, and **full final text**. Only typing lowercase `yes` exactly at that confirmation sends the final text to the selected OpenCode session. Any other answer, EOF, or Ctrl+C cancels without a send; there is no `--yes` flag. Exit codes: 0 sent, 2 cancelled or invalid usage, 1 failure. A confirmed send can invoke a **billable OpenCode model prompt**; inspect the session before retrying after an uncertain-delivery failure. Verification never falls back to another session and the bridge does not automatically retry sends. The original recording stays where you put it; the CLI does not store the recording or transcript in SQLite.
 
 ## Local Spanish voice service (manual setup)
 
