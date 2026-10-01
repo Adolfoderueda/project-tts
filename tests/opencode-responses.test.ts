@@ -61,7 +61,7 @@ test('all reads verify the exact session first, use scoped inputs and 30-second 
   const { responses, getSession, getMessage, list, prompt } = setup();
   await responses.verify(project, sessionId);
   expect(await responses.list(project, sessionId)).toEqual([{ id: messageId, completedAt: 200 }]);
-  expect(await responses.get(project, sessionId, messageId)).toEqual({ id: messageId, sessionId, completedAt: 200, text: 'Hola 世界' });
+  expect(await responses.get(project, sessionId, messageId)).toEqual({ id: messageId, sessionId, completedAt: 200, text: 'Hola \n世界' });
   expect(getSession).toHaveBeenCalledTimes(3);
   for (const call of getSession.mock.calls) expect(call).toEqual([{ sessionID: sessionId }, { signal: expect.any(AbortSignal) }]);
   expect(list).toHaveBeenCalledExactlyOnceWith({ sessionID: sessionId, limit: 20, order: 'desc', type: 'assistant' }, { signal: expect.any(AbortSignal) });
@@ -152,6 +152,38 @@ test('visible text is joined in order and limit counts Unicode code points', asy
   const { responses, getMessage } = setup();
   getMessage.mockResolvedValueOnce(message({ content: [{ type: 'text', text: '😀'.repeat(2000) }] }));
   expect((await responses.get(project, sessionId, messageId)).text).toBe('😀'.repeat(2000));
+});
+
+test('visible text parts join with one newline in order while reasoning and tools are excluded', async () => {
+  const { responses, getMessage } = setup();
+  const hiddenParts = message().content.slice(1, 3);
+  getMessage.mockResolvedValueOnce(message({ content: [
+    ...hiddenParts, { type: 'text', text: 'First' }, ...hiddenParts,
+    { type: 'text', text: 'Second' }, ...hiddenParts, { type: 'text', text: 'Third' }, ...hiddenParts,
+  ] }));
+  expect((await responses.get(project, sessionId, messageId)).text).toBe('First\nSecond\nThird');
+});
+
+test('joined text at 2000 code points including separators remains eligible', async () => {
+  const { responses, getMessage, list } = setup();
+  const value = message({ content: [
+    { type: 'text', text: '😀'.repeat(1998) }, ...message().content.slice(1, 3), { type: 'text', text: 'X' },
+  ] });
+  getMessage.mockResolvedValueOnce(value);
+  list.mockResolvedValueOnce({ data: [value], cursor: {} });
+  expect((await responses.get(project, sessionId, messageId)).text).toBe('😀'.repeat(1998) + '\nX');
+  expect(await responses.list(project, sessionId)).toEqual([{ id: messageId, completedAt: 200 }]);
+});
+
+test('newline separators taking joined text over 2000 code points cause get rejection and list exclusion', async () => {
+  const { responses, getMessage, list } = setup();
+  const value = message({ content: [
+    { type: 'text', text: '😀'.repeat(1999) }, ...message().content.slice(1, 3), { type: 'text', text: 'X' },
+  ] });
+  getMessage.mockResolvedValueOnce(value);
+  list.mockResolvedValueOnce({ data: [value], cursor: {} });
+  await expect(responses.get(project, sessionId, messageId)).rejects.toThrow(/2000 Unicode code points/);
+  expect(await responses.list(project, sessionId)).toEqual([]);
 });
 
 test.each([

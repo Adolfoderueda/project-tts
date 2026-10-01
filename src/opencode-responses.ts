@@ -41,11 +41,11 @@ function completedResponse(value: unknown, sessionId: string): CompletedResponse
     !Array.isArray(value.content)) {
     throw new Error('OpenCode message is not an eligible completed assistant response');
   }
-  const text = value.content.map((part: unknown) => {
-    if (!isRecord(part) || part.type !== 'text') return '';
+  const text = value.content.flatMap((part: unknown) => {
+    if (!isRecord(part) || part.type !== 'text') return [];
     if (typeof part.text !== 'string') throw new Error('OpenCode response text could not be verified');
-    return part.text;
-  }).join('');
+    return [part.text];
+  }).join('\n');
   assertVoiceText(text);
   return { id: value.id, sessionId, completedAt: value.time.completed, text };
 }
