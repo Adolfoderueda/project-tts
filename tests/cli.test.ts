@@ -1,4 +1,4 @@
-import { describe, expect, test } from 'vitest';
+import { describe, expect, test, vi } from 'vitest';
 import { Writable, PassThrough } from 'node:stream';
 import { mkdtemp, readFile, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -7,6 +7,7 @@ import { main, type CliDependencies } from '../src/cli.js';
 import { EventStore } from '../src/store.js';
 import type { CapturedEvent } from '../src/events.js';
 import type { ProjectConfig } from '../src/config.js';
+import { LineTerminalPrompt } from '../src/reply.js';
 
 const alphaDirectory = join(tmpdir(), 'project-voice-bridge-projects', 'alpha');
 const bravoDirectory = join(tmpdir(), 'project-voice-bridge-projects', 'bravo');
@@ -29,6 +30,91 @@ function captureWritable() {
 }
 
 describe('cli', () => {
+  test.each(['en', 'es'] as const)('bilingual reply honors %s override and sends exact final text once', async language => {
+    const c = await bilingualCli({ language: language === 'en' ? 'es' : 'en' });
+    const run = c.run(['--chat-language', language]);
+    await waitForOutput(c.stdout, 'Enter replacement');
+    c.input.write('texto revisado\n');
+    await waitForOutput(c.stdout, 'Enter target replacement');
+    c.input.write('final correction\n');
+    await waitForOutput(c.stdout, 'Type yes exactly');
+    c.input.write('yes\n');
+    expect(await run).toBe(0);
+    expect(c.translate).toHaveBeenCalledTimes(language === 'en' ? 1 : 0);
+    if (language === 'en') expect(c.translate).toHaveBeenCalledExactlyOnceWith('texto revisado', 'es', 'en');
+    expect(c.send).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ sessionId: 'session-0' }), 'final correction');
+    expect(c.close).toHaveBeenCalledTimes(1);
+    expect(c.input.listenerCount('keypress')).toBe(0);
+  });
+
+  test('missing bilingual language fails before STT and closes store', async () => {
+    const c = await bilingualCli();
+    expect(await c.run()).toBe(1);
+    expect(c.transcribe).not.toHaveBeenCalled();
+    expect(c.stderr.output()).toContain('Chat language is required');
+    expect(c.close).toHaveBeenCalledTimes(1);
+  });
+
+  test('legacy reply rejects language override before STT and never creates translator', async () => {
+    const c = await bilingualCli({ legacy: true });
+    expect(await c.run(['--chat-language', 'en'])).toBe(2);
+    expect(c.transcribe).not.toHaveBeenCalled();
+    expect(c.createTranslator).not.toHaveBeenCalled();
+  });
+
+  test('legacy reply never creates translator and retains the single edit flow', async () => {
+    const c = await bilingualCli({ legacy: true });
+    const run = c.run();
+    await waitForOutput(c.stdout, 'Enter replacement');
+    c.input.write('legacy final\n');
+    await waitForOutput(c.stdout, 'Type yes exactly');
+    c.input.write('yes\n');
+    expect(await run).toBe(0);
+    expect(c.createTranslator).not.toHaveBeenCalled();
+    expect(c.stdout.output()).not.toContain('Enter target replacement');
+    expect(c.send).toHaveBeenCalledExactlyOnceWith(expect.anything(), 'legacy final');
+  });
+
+  test('bilingual reply uses configured language without an override', async () => {
+    const c = await bilingualCli({ language: 'es' });
+    const run = c.run();
+    await waitForOutput(c.stdout, 'Enter replacement');
+    c.input.write('\n');
+    await waitForOutput(c.stdout, 'Enter target replacement');
+    expect(c.stdout.output()).toContain('Same-language final-text review');
+    c.input.write('\n');
+    await waitForOutput(c.stdout, 'Type yes exactly');
+    c.input.write('yes\n');
+    expect(await run).toBe(0);
+    expect(c.translate).not.toHaveBeenCalled();
+    expect(c.send).toHaveBeenCalledExactlyOnceWith(expect.anything(), 'texto original');
+  });
+
+  test.each(['cancel', 'translation', 'store-close', 'prompt-close'] as const)('bilingual %s closes resources and redacts failures', async scenario => {
+    const c = await bilingualCli({ language: 'en', failTranslation: scenario === 'translation', failClose: scenario === 'store-close' });
+    const original = LineTerminalPrompt.prototype.close;
+    const promptClose = scenario === 'prompt-close' ? vi.spyOn(LineTerminalPrompt.prototype, 'close') : undefined;
+    if (promptClose) {
+      promptClose.mockImplementation(function (this: LineTerminalPrompt) { original.call(this); throw new Error('PRIVATE_TEXT Bearer secret-token'); });
+    }
+    try {
+      const run = c.run();
+      await waitForOutput(c.stdout, 'Enter replacement');
+      if (scenario === 'translation') c.input.write('\n');
+      else c.input.end();
+      expect(await run).toBe(scenario === 'cancel' ? 2 : 1);
+      expect(c.send).not.toHaveBeenCalled();
+      expect(c.close).toHaveBeenCalledTimes(1);
+      expect(c.input.listenerCount('keypress')).toBe(0);
+      expect(c.stderr.output()).not.toMatch(/PRIVATE_TEXT|Bearer|secret-token/);
+    } finally { promptClose?.mockRestore(); }
+  });
+
+  test.each(['fr', '', 'en --chat-language'])('reply rejects invalid language %j', async value => {
+    const c = await bilingualCli({ language: 'en' });
+    expect(await c.run(['--chat-language', value])).toBe(2);
+    expect(c.transcribe).not.toHaveBeenCalled();
+  });
   test.each(['responses', 'speak-response'])('%s dispatcher resolves failure without leaking store close errors', async command => {
     const directory = await mkdtemp(join(tmpdir(), 'cli-close-'));
     const config = join(directory, 'config.json');
@@ -466,4 +552,33 @@ async function waitForOutput(output: { output(): string }, text: string): Promis
 function interactiveInput(): PassThrough {
   const input = new PassThrough();
   return Object.assign(input, { isTTY: true, setRawMode: () => input });
+}
+
+async function bilingualCli(options: { language?: 'en' | 'es'; legacy?: boolean; failTranslation?: boolean; failClose?: boolean } = {}) {
+  const directory = await mkdtemp(join(tmpdir(), 'bilingual-cli-'));
+  const db = join(directory, 'events.sqlite');
+  const config = await writeConfig(directory, db);
+  const data = JSON.parse(await readFile(config, 'utf8'));
+  if (!options.legacy) data.translation = { model: 'gemma4:e2b', digest: '7fbdbf8f5e45a75bb122155ed546e765b4d9c53a1285f62fd9f506baa1c5a47e' };
+  data.projects[0].chatLanguage = options.language;
+  await writeFile(config, JSON.stringify(data));
+  seedEvents(db, 1);
+  const stdout = captureWritable();
+  const stderr = captureWritable();
+  const input = interactiveInput();
+  const close = vi.fn();
+  const transcribe = vi.fn(async () => 'texto original');
+  const translate = vi.fn(async () => { if (options.failTranslation) throw new Error('PRIVATE_TEXT Bearer secret-token'); return 'reviewed text'; });
+  const send = vi.fn(async () => undefined);
+  const createTranslator = vi.fn(() => ({ translate }));
+  const dependencies: CliDependencies = {
+    createStore: path => { const store = new EventStore(path); return { get: store.get.bind(store), close: () => { close(); store.close(); if (options.failClose) throw new Error('PRIVATE_TEXT Bearer secret-token'); } } as EventStore; },
+    createVoice: () => { throw new Error('not used'); },
+    createTranscriber: () => ({ transcribe }),
+    createReply: () => ({ verify: async project => ({ project, sessionId: 'session-0' }), send }),
+    createTranslator,
+    createMonitor: () => { throw new Error('not used'); },
+    onSigint: () => () => undefined,
+  };
+  return { stdout, stderr, input, close, transcribe, translate, send, createTranslator, run: (extra: string[] = []) => main(['reply', '--config', config, '--event-id', 'event-0', '--audio', 'recording.wav', ...extra], { stdout: stdout.stream, stderr: stderr.stream, stdin: input }, dependencies) };
 }

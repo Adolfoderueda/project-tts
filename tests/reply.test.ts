@@ -4,6 +4,7 @@ import type { CapturedEvent } from '../src/events.js';
 import type { ProjectConfig } from '../src/config.js';
 import type { VerifiedDestination } from '../src/opencode-reply.js';
 import { replyToEvent, LineTerminalPrompt } from '../src/reply.js';
+import { replyBilingualToEvent } from '../src/bilingual-reply.js';
 
 const project: ProjectConfig = { id: 'demo', name: 'Demo Project', directory: 'C:\\demo' };
 const event: CapturedEvent = { id: 'event-1', projectId: 'demo', projectName: 'Demo Project', sessionId: 'session-1', kind: 'turn-ended', occurredAt: '2026-09-29T00:00:00Z', summary: 'Turn finished', rawEventType: 'session.idle' };
@@ -46,13 +47,13 @@ describe('replyToEvent', () => {
 });
 
 describe('LineTerminalPrompt', () => {
-  function terminal(interactive = true) {
+  function terminal(interactive = true, bilingual = false) {
     const input = new PassThrough();
     if (interactive) Object.assign(input, { isTTY: true, setRawMode: () => input });
     const output = new PassThrough();
     let printed = '';
     output.on('data', chunk => { printed += chunk.toString(); });
-    const prompt = new LineTerminalPrompt(input, output, event);
+    const prompt = new LineTerminalPrompt(input, output, event, { bilingual });
     return { input, prompt, printed: () => printed };
   }
 
@@ -70,6 +71,86 @@ describe('LineTerminalPrompt', () => {
     expect(printed()).toContain('corregido final');
     input.write('yes\n');
     expect(await confirmation).toBe(true);
+    prompt.close();
+  });
+
+  test('bilingual safely displays both versions and discards queued yes at each edit', async () => {
+    const { input, prompt, printed } = terminal(true, true);
+    const text = 'línea\n\x1b[31m\r\u202e';
+    const editing = prompt.edit(text);
+    input.write('\nyes\n');
+    expect(await editing).toBe(text);
+    const review = { spanishText: text, targetText: 'full\ntranslation', chatLanguage: 'en' as const };
+    const target = prompt.editTarget(review);
+    input.write('\nyes\n');
+    expect(await target).toBe(review.targetText);
+    const confirmation = prompt.confirmBilingual(destination, review);
+    input.write('no\n');
+    expect(await confirmation).toBe(false);
+    for (const label of ['Spanish source:', 'Target text (en):', 'Chat language: en', 'Demo Project', 'session-1', 'event-1', 'Turn finished', '\\u001b[31m\\u000d\\u202e', 'full\ntranslation']) expect(printed()).toContain(label);
+    prompt.close();
+  });
+
+  test.each(['yes', 'yes\n', 'yes\n\x03'])('bilingual closure wins over %j', async chunk => {
+    const { input, prompt } = terminal(true, true);
+    const response = prompt.confirmBilingual(destination, { spanishText: 'fuente', targetText: 'final', chatLanguage: 'en' });
+    input.end(chunk);
+    expect(await response).toBe(false);
+    prompt.close();
+  });
+
+  test.each(['', 'YES', ' yes ', 'unexpected'])('bilingual rejects %j', async answer => {
+    const { input, prompt } = terminal(true, true);
+    const response = prompt.confirmBilingual(destination, { spanishText: 'fuente', targetText: 'final', chatLanguage: 'en' });
+    input.write(`${answer}\n`);
+    expect(await response).toBe(false);
+    prompt.close();
+  });
+
+  test('bilingual non-TTY cannot approve and target EOF cancels', async () => {
+    const first = terminal(false, true);
+    expect(await first.prompt.confirmBilingual(destination, { spanishText: 'fuente', targetText: 'final', chatLanguage: 'es' })).toBe(false);
+    first.prompt.close();
+    const second = terminal(true, true);
+    const target = second.prompt.editTarget({ spanishText: 'fuente', targetText: 'final', chatLanguage: 'es' });
+    second.input.end();
+    expect(await target).toBeNull();
+    second.prompt.close();
+  });
+
+  test.each(['source', 'target', 'confirmation'] as const)('bilingual Ctrl+C at %s never sends', async stage => {
+    const { input, prompt, printed } = terminal(true, true);
+    const send = vi.fn(async () => undefined);
+    const translate = vi.fn(async () => 'translated\nmultiline');
+    const run = replyBilingualToEvent(event, project, 'recording.wav', 'en', { transcribe: async () => 'fuente' },
+      { translate }, { verify: async () => destination, send }, prompt);
+    await waitForText(printed, 'Enter replacement');
+    if (stage !== 'source') {
+      input.write('\n');
+      await waitForText(printed, 'Enter target replacement');
+      if (stage === 'confirmation') {
+        input.write('\n');
+        await waitForText(printed, 'Type yes exactly');
+      }
+    }
+    input.write('\x03');
+    expect(await run).toBe('cancelled');
+    expect(send).not.toHaveBeenCalled();
+    prompt.close();
+  });
+
+  test('bilingual confirmation safely escapes destination and event metadata', async () => {
+    const input = new PassThrough();
+    Object.assign(input, { isTTY: true, setRawMode: () => input });
+    const output = new PassThrough();
+    let printed = '';
+    output.on('data', chunk => { printed += chunk.toString(); });
+    const prompt = new LineTerminalPrompt(input, output, { ...event, summary: 'summary\r\u202e\x1b' }, { bilingual: true });
+    const response = prompt.confirmBilingual({ project: { ...project, name: 'name\r\u202e\x1b' }, sessionId: 'session\r\u202e\x1b' },
+      { spanishText: 'fuente', targetText: 'final', chatLanguage: 'es' });
+    for (const field of ['name', 'session', 'summary']) expect(printed).toContain(`${field}\\u000d\\u202e\\u001b`);
+    input.write('yes\n');
+    expect(await response).toBe(true);
     prompt.close();
   });
 

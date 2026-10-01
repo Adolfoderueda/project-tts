@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { fileURLToPath } from 'node:url';
-import { loadConfig, type ProjectConfig, type TranslationConfig } from './config.js';
+import { loadConfig, type ChatLanguage, type ProjectConfig, type TranslationConfig } from './config.js';
 import { EventStore } from './store.js';
 import { OpenCodeMonitor } from './opencode-monitor.js';
 import { selectEvent } from './event-selection.js';
@@ -11,6 +11,8 @@ import { LineTerminalPrompt, replyToEvent } from './reply.js';
 import { OpenCodeResponses } from './opencode-responses.js';
 import { OllamaTranslator, type Translator } from './translation-client.js';
 import { runResponses, runSpeakResponse } from './cli-responses.js';
+import { replyBilingualToEvent } from './bilingual-reply.js';
+import { resolveChatLanguage } from './chat-language.js';
 
 export interface CliIo {
   stdout: NodeJS.WritableStream;
@@ -37,7 +39,7 @@ Commands:
   speak --config <path> --event-id <id> --output <wav>
   responses --config <path> --event-id <id> [--limit <1..20>] [--json]
   speak-response --config <path> --event-id <id> --message-id <id> --output <wav> [--chat-language en|es]
-  reply --config <path> --event-id <id> --audio <file>
+  reply --config <path> --event-id <id> --audio <file> [--chat-language en|es]
 `;
 
 const defaultDependencies: CliDependencies = {
@@ -116,16 +118,18 @@ function parseSpeakArgs(args: string[]): { configPath: string; eventId: string; 
   return { configPath: values.get('--config')!, eventId: values.get('--event-id')!, outputPath: values.get('--output')! };
 }
 
-function parseReplyArgs(args: string[]): { configPath: string; eventId: string; audioPath: string } | null {
+function parseReplyArgs(args: string[]): { configPath: string; eventId: string; audioPath: string; chatLanguage?: ChatLanguage } | null {
   const values = new Map<string, string>();
   for (let index = 0; index < args.length; index += 2) {
     const key = args[index];
     const value = args[index + 1];
-    if (!['--config', '--event-id', '--audio'].includes(key ?? '') || values.has(key) || !value || value.startsWith('--')) return null;
+    if (!['--config', '--event-id', '--audio', '--chat-language'].includes(key ?? '') || values.has(key) || !value || value.startsWith('--')) return null;
     values.set(key, value);
   }
-  if (values.size !== 3) return null;
-  return { configPath: values.get('--config')!, eventId: values.get('--event-id')!, audioPath: values.get('--audio')! };
+  if (!values.has('--config') || !values.has('--event-id') || !values.has('--audio')) return null;
+  const chatLanguage = values.get('--chat-language');
+  if (chatLanguage !== undefined && chatLanguage !== 'en' && chatLanguage !== 'es') return null;
+  return { configPath: values.get('--config')!, eventId: values.get('--event-id')!, audioPath: values.get('--audio')!, ...(chatLanguage === undefined ? {} : { chatLanguage }) };
 }
 
 function writeUsage(io: CliIo): void {
@@ -216,14 +220,24 @@ async function runReply(args: string[], io: CliIo, dependencies: CliDependencies
   }
   let store: EventStore | undefined;
   let prompt: LineTerminalPrompt | undefined;
+  let bilingual = false;
   try {
     const config = loadConfig(parsed.configPath);
+    bilingual = config.translation !== undefined;
+    if (!bilingual && parsed.chatLanguage !== undefined) {
+      io.stderr.write('--chat-language requires bilingual translation configuration.\n');
+      return 2;
+    }
     store = dependencies.createStore(config.databasePath);
     const { event, project } = selectEvent(store, config.projects, parsed.eventId);
+    const chatLanguage = bilingual ? resolveChatLanguage(project, parsed.chatLanguage) : undefined;
     const voice = dependencies.createTranscriber?.() ?? new VoiceClient();
     const opencode = dependencies.createReply?.() ?? new OpenCodeReply();
-    prompt = new LineTerminalPrompt(input, io.stdout, event);
-    const result = await replyToEvent(event, project, parsed.audioPath, voice, opencode, prompt);
+    prompt = new LineTerminalPrompt(input, io.stdout, event, { bilingual });
+    const result = config.translation
+      ? await replyBilingualToEvent(event, project, parsed.audioPath, chatLanguage!, voice,
+        dependencies.createTranslator?.(config.translation) ?? new OllamaTranslator(config.translation), opencode, prompt)
+      : await replyToEvent(event, project, parsed.audioPath, voice, opencode, prompt);
     if (result === 'cancelled') {
       io.stdout.write('Reply cancelled; nothing sent.\n');
       return 2;
@@ -232,11 +246,23 @@ async function runReply(args: string[], io: CliIo, dependencies: CliDependencies
     return 0;
   } catch (error) {
     // Do not echo transport exceptions: they may include authentication headers or transcripts.
-    io.stderr.write(`${safeReplyDiagnostic(error)}\n`);
+    const diagnostic = bilingual && error instanceof Error && error.message === 'Chat language is required: set project chatLanguage or supply --chat-language en|es.'
+      ? error.message : safeReplyDiagnostic(error);
+    io.stderr.write(`${diagnostic}\n`);
     return 1;
   } finally {
-    prompt?.close();
-    store?.close();
+    if (bilingual) {
+      let cleanupFailed = false;
+      try { prompt?.close(); } catch { cleanupFailed = true; }
+      try { store?.close(); } catch { cleanupFailed = true; }
+      if (cleanupFailed) {
+        io.stderr.write('Reply cleanup failed. If a send was attempted, delivery may be uncertain; inspect the OpenCode session before trying again.\n');
+        return 1;
+      }
+    } else {
+      prompt?.close();
+      store?.close();
+    }
   }
 }
 

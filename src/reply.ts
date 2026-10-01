@@ -3,6 +3,8 @@ import type { ProjectConfig } from './config.js';
 import type { CapturedEvent } from './events.js';
 import type { VoiceClient } from './voice-client.js';
 import type { OpenCodeReply, VerifiedDestination } from './opencode-reply.js';
+import type { BilingualReview, BilingualTerminalPrompt } from './bilingual-reply.js';
+import { formatReviewText } from './voice-text.js';
 
 export interface TerminalPrompt {
   edit(initial: string): Promise<string | null>;
@@ -29,7 +31,7 @@ export async function replyToEvent(
 }
 
 /** One line replaces the transcript; an empty line keeps it unchanged. */
-export class LineTerminalPrompt implements TerminalPrompt {
+export class LineTerminalPrompt implements TerminalPrompt, BilingualTerminalPrompt {
   readonly #readline: Interface;
   readonly #output: NodeJS.WritableStream;
   readonly #input: NodeJS.ReadableStream;
@@ -39,7 +41,7 @@ export class LineTerminalPrompt implements TerminalPrompt {
   #pending: ((value: string | null) => void) | undefined;
   #closed = false;
 
-  constructor(input: NodeJS.ReadableStream, output: NodeJS.WritableStream, private readonly event: CapturedEvent) {
+  constructor(input: NodeJS.ReadableStream, output: NodeJS.WritableStream, private readonly event: CapturedEvent, private readonly options: { bilingual?: boolean } = {}) {
     this.#input = input;
     this.#interactive = (input as NodeJS.ReadableStream & { isTTY?: boolean }).isTTY === true;
     this.#output = output;
@@ -70,7 +72,9 @@ export class LineTerminalPrompt implements TerminalPrompt {
   async edit(initial: string): Promise<string | null> {
     // Discard pre-typed answers: review must precede every response.
     this.#lines.length = 0;
-    this.#output.write(`Transcript:\n${initial}\nEnter replacement on one line (Enter keeps transcript; Ctrl+C/EOF cancels): `);
+    this.#output.write(this.options.bilingual
+      ? `Spanish source:\n${formatReviewText(initial)}\nEnter replacement on one line (Enter keeps transcript; Ctrl+C/EOF cancels): `
+      : `Transcript:\n${initial}\nEnter replacement on one line (Enter keeps transcript; Ctrl+C/EOF cancels): `);
     const line = await this.#readLine();
     return line === null ? null : line === '' ? initial : line;
   }
@@ -78,6 +82,28 @@ export class LineTerminalPrompt implements TerminalPrompt {
   async confirm(destination: VerifiedDestination, text: string): Promise<boolean> {
     this.#lines.length = 0;
     this.#output.write(`\nVerified destination:\nProject: ${destination.project.name} (${destination.project.id})\nSession: ${destination.sessionId}\nEvent: ${this.event.id} (${this.event.kind}) — ${this.event.summary}\nFinal text:\n${text}\nSend to this session? Type yes exactly: `);
+    return this.#checkAnswer();
+  }
+
+  async editTarget(review: BilingualReview): Promise<string | null> {
+    this.#lines.length = 0;
+    this.#output.write(`\n${this.#formatReview(review)}\n${review.chatLanguage === 'es' ? 'Same-language final-text review.\n' : ''}Enter target replacement on one line (Enter keeps complete target; Ctrl+C/EOF cancels): `);
+    const line = await this.#readLine();
+    return line === null ? null : line === '' ? review.targetText : line;
+  }
+
+  async confirmBilingual(destination: VerifiedDestination, review: BilingualReview): Promise<boolean> {
+    this.#lines.length = 0;
+    const safe = formatReviewText;
+    this.#output.write(`\nVerified destination:\nProject: ${safe(destination.project.name)} (${safe(destination.project.id)})\nSession: ${safe(destination.sessionId)}\nEvent: ${safe(this.event.id)} (${safe(this.event.kind)}) — ${safe(this.event.summary)}\nChat language: ${safe(review.chatLanguage)}\n${this.#formatReview(review)}\nSend to this session? Type yes exactly: `);
+    return this.#checkAnswer();
+  }
+
+  #formatReview(review: BilingualReview): string {
+    return `Spanish source:\n${formatReviewText(review.spanishText)}\nTarget text (${formatReviewText(review.chatLanguage)}):\n${formatReviewText(review.targetText)}`;
+  }
+
+  async #checkAnswer(): Promise<boolean> {
     if (!this.#interactive) return false;
     const answer = await this.#readLine();
     // readline may deliver an unterminated last line during EOF, or a line
