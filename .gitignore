@@ -1,6 +1,11 @@
 node_modules/
 dist/
 .worktrees/
+.superpowers/
+
+# Private local voice recordings and generated speech
+*.m4a
+*.wav
 
 # Local runtime data and configuration
 *.sqlite
