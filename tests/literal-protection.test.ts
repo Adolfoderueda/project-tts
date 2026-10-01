@@ -73,6 +73,20 @@ describe('literal protection', () => {
     expect(() => restoreLiterals(translated, protectedText)).toThrow();
   });
 
+  test.each([
+    '__PVB_check_0__PVB_check_0__',
+    '__PVB_check_0__PVB_check_99__',
+    '__PVB_check_0__PVB_check_broken',
+  ])('rejects overlapping duplicate or unknown namespace markers %j', (translated) => {
+    const protectedText = protectLiterals('`one`', () => 'check');
+    expect(() => restoreLiterals(translated, protectedText)).toThrow();
+  });
+
+  test('rejects overlapping expected markers rather than restoring intersecting slices', () => {
+    const protectedText = protectLiterals('`one` and `two`', () => 'check');
+    expect(() => restoreLiterals('__PVB_check_0__PVB_check_1__', protectedText)).toThrow();
+  });
+
   test('leaves prose and other namespaces untouched', () => {
     const protectedText = protectLiterals('`one`', () => 'check');
     expect(restoreLiterals('__PVB_other_7__ __PVB_check_0__', protectedText)).toBe('__PVB_other_7__ `one`');

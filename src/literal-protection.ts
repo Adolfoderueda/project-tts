@@ -109,13 +109,17 @@ export function restoreLiterals(translated: string, protectedText: ProtectedLite
   const namespace = literals[0].placeholder.slice(0, -3);
   const positions: number[] = [];
   let cursor = 0;
+  let previousEnd = 0;
   for (const literal of literals) {
     const position = translated.indexOf(namespace, cursor);
-    if (position === -1 || !translated.startsWith(literal.placeholder, position)) {
+    if (position === -1 || position < previousEnd || !translated.startsWith(literal.placeholder, position)) {
       throw new Error('Missing, unknown or reordered literal placeholder');
     }
     positions.push(position);
-    cursor = position + literal.placeholder.length;
+    previousEnd = position + literal.placeholder.length;
+    // Search from the next character, not after the marker: namespace starts can
+    // overlap its trailing underscores and must still be validated.
+    cursor = position + 1;
   }
   if (translated.indexOf(namespace, cursor) !== -1) {
     throw new Error('Duplicate or unknown literal placeholder');
