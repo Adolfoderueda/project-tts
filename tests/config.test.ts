@@ -16,6 +16,67 @@ async function writeConfig(contents: unknown): Promise<string> {
 }
 
 describe('loadConfig', () => {
+  const digest = '7fbdbf8f5e45a75bb122155ed546e765b4d9c53a1285f62fd9f506baa1c5a47e';
+
+  test.each(['en', 'es'])('accepts opt-in translation with %s chat language', async (chatLanguage) => {
+    const config = {
+      databasePath: './bridge.sqlite',
+      translation: { model: 'gemma4:e2b', digest },
+      projects: [{ id: 'alpha', name: 'Alpha', directory: alphaDirectory, chatLanguage }],
+    };
+
+    expect(loadConfig(await writeConfig(config))).toEqual(config);
+  });
+
+  test('accepts translation without a project language for a later command override', async () => {
+    const config = {
+      databasePath: './bridge.sqlite',
+      translation: { model: 'gemma4:e2b', digest },
+      projects: [{ id: 'alpha', name: 'Alpha', directory: alphaDirectory }],
+    };
+
+    expect(loadConfig(await writeConfig(config))).toEqual(config);
+  });
+
+  test('project language alone does not enable translation', async () => {
+    const config = {
+      databasePath: './bridge.sqlite',
+      projects: [{ id: 'alpha', name: 'Alpha', directory: alphaDirectory, chatLanguage: 'es' }],
+    };
+
+    expect(loadConfig(await writeConfig(config))).toEqual(config);
+    expect(loadConfig(await writeConfig(config))).not.toHaveProperty('translation');
+  });
+
+  test.each(['fr', '', 'EN', null])('rejects unsupported chat language %s', async (chatLanguage) => {
+    const path = await writeConfig({
+      databasePath: './bridge.sqlite',
+      projects: [{ id: 'alpha', name: 'Alpha', directory: alphaDirectory, chatLanguage }],
+    });
+
+    expect(() => loadConfig(path)).toThrow(ConfigError);
+  });
+
+  test.each(['gemma4', 'gemma4:latest', 'gemma4:31b', 'gemma4:e2b-cloud', 'other:e2b', ''])('rejects unsupported translation model %s', async (model) => {
+    const path = await writeConfig({
+      databasePath: './bridge.sqlite',
+      translation: { model, digest },
+      projects: [{ id: 'alpha', name: 'Alpha', directory: alphaDirectory }],
+    });
+
+    expect(() => loadConfig(path)).toThrow(ConfigError);
+  });
+
+  test.each([undefined, '', 'a'.repeat(63), 'a'.repeat(65), 'A'.repeat(64), 'g'.repeat(64), `${digest}\n`, ` ${digest}`])('rejects invalid translation digest %s', async (invalidDigest) => {
+    const path = await writeConfig({
+      databasePath: './bridge.sqlite',
+      translation: { model: 'gemma4:e2b', digest: invalidDigest },
+      projects: [{ id: 'alpha', name: 'Alpha', directory: alphaDirectory }],
+    });
+
+    expect(() => loadConfig(path)).toThrow(ConfigError);
+  });
+
   test('accepts_multiple_projects_with_absolute_directories', async () => {
     const path = await writeConfig({
       databasePath: './bridge.sqlite',

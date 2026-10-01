@@ -2,15 +2,24 @@ import { readFileSync } from 'node:fs';
 import { z } from 'zod';
 import { normalizeProjectDirectory } from './project-paths.js';
 
+export type ChatLanguage = 'en' | 'es';
+
+export interface TranslationConfig {
+  model: 'gemma4:e2b';
+  digest: string;
+}
+
 export interface ProjectConfig {
   id: string;
   name: string;
   directory: string;
+  chatLanguage?: ChatLanguage;
 }
 
 export interface BridgeConfig {
   databasePath: string;
   projects: ProjectConfig[];
+  translation?: TranslationConfig;
 }
 
 export class ConfigError extends Error {
@@ -31,10 +40,15 @@ const absoluteProjectDirectory = z.string().min(1, 'project directory is require
 
 const bridgeConfigSchema = z.object({
   databasePath: z.string().min(1, 'databasePath is required'),
+  translation: z.object({
+    model: z.literal('gemma4:e2b'),
+    digest: z.string().length(64).regex(/^[0-9a-f]+$/u, 'digest must be exactly 64 lowercase hexadecimal characters'),
+  }).optional(),
   projects: z.array(z.object({
     id: z.string().min(1, 'project id is required'),
     name: z.string().min(1, 'project name is required'),
     directory: absoluteProjectDirectory,
+    chatLanguage: z.enum(['en', 'es']).optional(),
   })).min(1, 'at least one project is required'),
 }).superRefine((config, context) => {
   const seenProjectIds = new Set<string>();
