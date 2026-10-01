@@ -29,6 +29,13 @@ function captureWritable() {
 }
 
 describe('cli', () => {
+  test('usage includes explicit response selection commands without changing legacy commands', async () => {
+    const stderr = captureWritable();
+    expect(await main([], { stdout: captureWritable().stream, stderr: stderr.stream })).toBe(2);
+    expect(stderr.output()).toContain('speak --config <path> --event-id <id> --output <wav>');
+    expect(stderr.output()).toContain('responses --config <path> --event-id <id> [--limit <1..20>] [--json]');
+    expect(stderr.output()).toContain('speak-response --config <path> --event-id <id> --message-id <id> --output <wav> [--chat-language en|es]');
+  });
   test('reply sends only after explicit yes, closes store and reports cancellation separately', async () => {
     const directory = await mkdtemp(join(tmpdir(), 'project-voice-bridge-cli-'));
     const db = join(directory, 'events.sqlite');

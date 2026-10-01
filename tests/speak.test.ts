@@ -16,9 +16,9 @@ const event: CapturedEvent = { id: 'one', projectId: 'alpha', projectName: 'Proy
 
 describe('speakEvent', () => {
   test.each([
-    ['turn-ended', /terminó (su )?turno/i],
-    ['waiting-for-input', /esperando|necesita/i],
-    ['error', /error/i],
+    ['turn-ended', 'terminó su turno'],
+    ['waiting-for-input', 'está esperando una respuesta'],
+    ['error', 'encontró un error'],
   ] as const)('speaks conservative Spanish status for %s', async (kind, expected) => {
     const directory = await mkdtemp(join(tmpdir(), 'speak-'));
     const synthesize = vi.fn(async (_text: string) => wav);
@@ -26,7 +26,7 @@ describe('speakEvent', () => {
     await speakEvent({ ...event, kind }, path, { synthesize });
     expect(synthesize).toHaveBeenCalledOnce();
     expect(synthesize.mock.calls[0]?.[0]).toContain('Proyecto Ñandú');
-    expect(synthesize.mock.calls[0]?.[0]).toMatch(expected);
+    expect(synthesize.mock.calls[0]?.[0]).toBe(`En el proyecto Proyecto Ñandú, OpenCode ${expected}.`);
     expect(synthesize.mock.calls[0]?.[0]).not.toContain('untrusted');
     expect(synthesize.mock.calls[0]?.[0]).not.toMatch(/proyecto (está )?completado/i);
     expect(await readFile(path)).toEqual(Buffer.from(wav));

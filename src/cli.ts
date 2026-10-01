@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { fileURLToPath } from 'node:url';
-import { loadConfig, type ProjectConfig } from './config.js';
+import { loadConfig, type ProjectConfig, type TranslationConfig } from './config.js';
 import { EventStore } from './store.js';
 import { OpenCodeMonitor } from './opencode-monitor.js';
 import { selectEvent } from './event-selection.js';
@@ -8,6 +8,9 @@ import { VoiceClient } from './voice-client.js';
 import { speakEvent } from './speak.js';
 import { OpenCodeReply } from './opencode-reply.js';
 import { LineTerminalPrompt, replyToEvent } from './reply.js';
+import { OpenCodeResponses } from './opencode-responses.js';
+import { OllamaTranslator, type Translator } from './translation-client.js';
+import { runResponses, runSpeakResponse } from './cli-responses.js';
 
 export interface CliIo {
   stdout: NodeJS.WritableStream;
@@ -21,6 +24,8 @@ export interface CliDependencies {
   createVoice(): Pick<VoiceClient, 'synthesize'>;
   createTranscriber?(): Pick<VoiceClient, 'transcribe'>;
   createReply?(): Pick<OpenCodeReply, 'verify' | 'send'>;
+  createTranslator?(config: TranslationConfig): Translator;
+  createResponses?(): Pick<OpenCodeResponses, 'list' | 'get' | 'verify'>;
   onSigint(handler: () => void): () => void;
 }
 
@@ -30,6 +35,8 @@ Commands:
   start --config <path>
   events --config <path> [--limit <positive-integer>] [--json]
   speak --config <path> --event-id <id> --output <wav>
+  responses --config <path> --event-id <id> [--limit <1..20>] [--json]
+  speak-response --config <path> --event-id <id> --message-id <id> --output <wav> [--chat-language en|es]
   reply --config <path> --event-id <id> --audio <file>
 `;
 
@@ -39,6 +46,8 @@ const defaultDependencies: CliDependencies = {
   createVoice: () => new VoiceClient(),
   createTranscriber: () => new VoiceClient(),
   createReply: () => new OpenCodeReply(),
+  createTranslator: (config) => new OllamaTranslator(config),
+  createResponses: () => new OpenCodeResponses(),
   onSigint: (handler) => {
     process.on('SIGINT', handler);
     return () => {
@@ -278,6 +287,8 @@ export async function main(
   }
 
   const [command, ...args] = argv;
+  if (command === 'responses') return runResponses(args, io, dependencies);
+  if (command === 'speak-response') return runSpeakResponse(args, io, dependencies);
   if (command === 'events') {
     return runEvents(args, io, dependencies);
   }
