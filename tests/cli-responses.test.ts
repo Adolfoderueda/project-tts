@@ -114,3 +114,23 @@ test.each(['list', 'get', 'translate', 'verify', 'synthesize'] as const)('redact
   expect(result).toBe(1); expect(f.stderr.text()).not.toMatch(/PRIVATE_TEXT|Bearer|secret-token/); expect(f.close).toHaveBeenCalledOnce();
   await expect(readFile(f.output)).rejects.toMatchObject({ code: 'ENOENT' });
 });
+test.each(['responses', 'speak-response'] as const)('contains %s store close errors after success and workflow failure', async command => {
+  for (const failWorkflow of [false, true]) {
+    const f = await setup();
+    const createStore = f.deps.createStore;
+    f.deps.createStore = path => {
+      const store = createStore(path);
+      const close = store.close.bind(store);
+      store.close = () => { close(); throw new Error('PRIVATE_TEXT Bearer secret-token'); };
+      return store;
+    };
+    if (failWorkflow) {
+      (command === 'responses' ? f.list : f.get).mockRejectedValueOnce(new Error('PRIVATE_TEXT workflow credentials'));
+    }
+    const result = command === 'responses' ? runResponses(f.base, f.io, f.deps) : runSpeakResponse(f.speech, f.io, f.deps);
+    await expect(result).resolves.toBe(1);
+    expect(f.close).toHaveBeenCalledOnce();
+    expect(f.stderr.text()).toContain('Response command cleanup failed.');
+    expect(f.stderr.text()).not.toMatch(/PRIVATE_TEXT|Bearer|secret-token|credentials/);
+  }
+});

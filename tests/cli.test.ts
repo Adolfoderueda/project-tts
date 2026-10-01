@@ -29,6 +29,23 @@ function captureWritable() {
 }
 
 describe('cli', () => {
+  test.each(['responses', 'speak-response'])('%s dispatcher resolves failure without leaking store close errors', async command => {
+    const directory = await mkdtemp(join(tmpdir(), 'cli-close-'));
+    const config = join(directory, 'config.json');
+    await writeFile(config, JSON.stringify({ databasePath: ':memory:', projects: [{ id: 'alpha', name: 'Alpha', directory }] }));
+    const stderr = captureWritable();
+    const dependencies: CliDependencies = {
+      createStore: () => ({ get: () => undefined, close: () => { throw new Error('PRIVATE_TEXT Bearer secret-token'); } }) as unknown as EventStore,
+      createVoice: () => { throw new Error('not used'); },
+      createMonitor: () => { throw new Error('not used'); },
+      onSigint: () => () => undefined,
+    };
+    const args = [command, '--config', config, '--event-id', 'missing'];
+    if (command === 'speak-response') args.push('--message-id', 'chosen', '--output', join(directory, 'new.wav'));
+    await expect(main(args, { stdout: captureWritable().stream, stderr: stderr.stream }, dependencies)).resolves.toBe(1);
+    expect(stderr.output()).toContain('Response command cleanup failed.');
+    expect(stderr.output()).not.toMatch(/PRIVATE_TEXT|Bearer|secret-token/);
+  });
   test('usage includes explicit response selection commands without changing legacy commands', async () => {
     const stderr = captureWritable();
     expect(await main([], { stdout: captureWritable().stream, stderr: stderr.stream })).toBe(2);

@@ -53,7 +53,12 @@ export async function runResponses(args: string[], io: CliIo, deps: CliDependenc
     io.stderr.write('Response listing failed. Check the configuration, selected event, and OpenCode session.\n');
     return 1;
   } finally {
-    store?.close();
+    try {
+      store?.close();
+    } catch {
+      io.stderr.write('Response command cleanup failed. The event store could not be closed.\n');
+      return 1;
+    }
   }
 }
 
@@ -88,6 +93,11 @@ export async function runSpeakResponse(args: string[], io: CliIo, deps: CliDepen
     io.stderr.write('Response speech failed. Check bilingual configuration/chat language, the selected event/message, verified session, new WAV path, and local voice/translation services.\n');
     return 1;
   } finally {
-    store?.close();
+    try {
+      store?.close();
+    } catch {
+      io.stderr.write('Response command cleanup failed. The event store could not be closed.\n');
+      return 1;
+    }
   }
 }
