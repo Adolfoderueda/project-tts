@@ -199,6 +199,29 @@ describe('local translator', () => {
     expect(fetchClient).toHaveBeenCalledTimes(stage === 'tags' ? 1 : 2);
   });
 
+  test.each([
+    ['tags', false], ['chat', false], ['tags', true], ['chat', true],
+  ] as const)('HTTP failure at %s cancels body best-effort (cancel rejects: %s)', async (stage, rejects) => {
+    let cancellations = 0;
+    const bad = new Response(new ReadableStream<Uint8Array>({
+      start(controller) { controller.enqueue(new TextEncoder().encode('RAW_BODY PRIVATE_TEXT Bearer secret-token')); },
+      cancel() {
+        cancellations++;
+        if (rejects) return Promise.reject(new Error('RAW_BODY PRIVATE_TEXT Bearer secret-token'));
+      },
+    }), { status: 503 });
+    const read = vi.spyOn(bad.body!, 'getReader');
+    const { translator, fetchClient } = fixture(stage === 'chat' ? bad : json(envelope()), stage === 'tags' ? bad : json(tags));
+    const error = await translator.translate('PRIVATE_TEXT', 'en', 'es').catch((error: unknown) => error);
+    expect(error).toBeInstanceOf(TranslationError);
+    expect((error as Error).message).toMatch(/local translation failed/i);
+    expect((error as Error).message).not.toMatch(/RAW_BODY|PRIVATE_TEXT|Bearer|secret-token/);
+    expect((error as Error).cause).toBeUndefined();
+    expect(cancellations).toBe(1);
+    expect(read).not.toHaveBeenCalled();
+    expect(fetchClient).toHaveBeenCalledTimes(stage === 'tags' ? 1 : 2);
+  });
+
   test('uses a 120-second timeout for each request', async () => {
     const timeout = vi.spyOn(AbortSignal, 'timeout');
     try {

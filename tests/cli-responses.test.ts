@@ -6,6 +6,7 @@ import { join } from 'node:path';
 import { main, type CliDependencies } from '../src/cli.js';
 import { runResponses, runSpeakResponse } from '../src/cli-responses.js';
 import { EventStore } from '../src/store.js';
+import { OllamaTranslator, TranslationError } from '../src/translation-client.js';
 function capture(tty = true) {
   let text = '';
   const stream = new Writable({ write(chunk, _encoding, callback) { text += chunk.toString(); callback(); } });
@@ -40,6 +41,45 @@ test('listing defaults to 20, needs no translation, and prints only selection me
   expect(JSON.parse(f.stdout.text())).toEqual({ projectId: 'alpha', projectName: 'Alpha', sessionId: 'session', responses: [{ id: 'chosen', completedAt: 123 }] });
   expect(f.stdout.text()).not.toContain('PRIVATE_TEXT'); expect(f.close).toHaveBeenCalledOnce();
   expect(f.translate).not.toHaveBeenCalled(); expect(f.get).not.toHaveBeenCalled();
+});
+test.each(['PRIVATE_TEXT Bearer secret-token `unclosed', 'PRIVATE_TEXT\n```sh\nBearer secret-token'])('speech guides correction of malformed literals without TTS: %j', async text => {
+  const f = await setup();
+  f.get.mockResolvedValueOnce({ id: 'chosen', sessionId: 'session', completedAt: 123, text });
+  const fetchClient = vi.fn<typeof fetch>();
+  f.deps.createTranslator = config => new OllamaTranslator(config, fetchClient);
+  expect(await runSpeakResponse(f.speech, f.io, f.deps)).toBe(1);
+  expect(f.stderr.text()).toMatch(/correct.*backtick.*try again/i);
+  expect(f.stderr.text()).not.toMatch(/PRIVATE_TEXT|Bearer|secret-token/);
+  expect(f.stdout.text()).not.toMatch(/PRIVATE_TEXT|Bearer|secret-token/);
+  expect(fetchClient).not.toHaveBeenCalled();
+  expect(f.synthesize).not.toHaveBeenCalled();
+  expect(f.close).toHaveBeenCalledOnce();
+  await expect(readFile(f.output)).rejects.toMatchObject({ code: 'ENOENT' });
+});
+test.each([
+  ['literals', /correct.*backtick/i], ['invalidText', /nonempty.*2,000/i],
+  ['model', /model.*digest/i], ['response', /local runtime/i],
+] as const)('speech maps trusted %s category, not modified error text', async (reason, guidance) => {
+  const f = await setup();
+  const error = new TranslationError(reason);
+  error.message = 'PRIVATE_TEXT Bearer secret-token';
+  f.translate.mockRejectedValueOnce(error);
+  expect(await runSpeakResponse(f.speech, f.io, f.deps)).toBe(1);
+  expect(f.stderr.text()).toMatch(guidance);
+  expect(f.stderr.text()).not.toMatch(/PRIVATE_TEXT|Bearer|secret-token/);
+  expect(f.synthesize).not.toHaveBeenCalled();
+  expect(f.close).toHaveBeenCalledOnce();
+  await expect(readFile(f.output)).rejects.toMatchObject({ code: 'ENOENT' });
+});
+test.each([false, true])('speech does not trust forged translation errors (prototype: %s)', async forgePrototype => {
+  const f = await setup();
+  const error = Object.assign(new Error('PRIVATE_TEXT Bearer secret-token'), { name: 'TranslationError', reason: 'literals' });
+  if (forgePrototype) Object.setPrototypeOf(error, TranslationError.prototype);
+  f.translate.mockRejectedValueOnce(error);
+  expect(await runSpeakResponse(f.speech, f.io, f.deps)).toBe(1);
+  expect(f.stderr.text()).toContain('Response speech failed.');
+  expect(f.stderr.text()).not.toMatch(/PRIVATE_TEXT|Bearer|secret-token|backtick/);
+  expect(f.synthesize).not.toHaveBeenCalled();
 });
 test('empty page reports no eligible response; explicit bounded limit works', async () => {
   const f = await setup(); f.list.mockResolvedValueOnce([]);

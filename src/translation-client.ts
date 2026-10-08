@@ -13,11 +13,21 @@ const diagnostics = {
   response: 'Local translation failed. Check the local runtime and try again after reviewing the text.',
 } as const;
 
+// Keep category provenance separate from mutable Error messages/properties.
+const errorReasons = new WeakMap<TranslationError, keyof typeof diagnostics>();
+
 export class TranslationError extends Error {
   constructor(reason: keyof typeof diagnostics = 'response') {
     super(diagnostics[reason]);
     this.name = 'TranslationError';
+    errorReasons.set(this, reason);
   }
+}
+
+export function translationDiagnostic(error: unknown): string | undefined {
+  if (!(error instanceof TranslationError)) return undefined;
+  const reason = errorReasons.get(error);
+  return reason === undefined ? undefined : diagnostics[reason];
 }
 
 const MAX_RESPONSE_BYTES = 1024 * 1024;
@@ -52,7 +62,12 @@ export class OllamaTranslator implements Translator {
       signal: AbortSignal.timeout(120_000),
       ...(body === undefined ? {} : { headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }),
     });
-    if (!response.ok || !response.body) throw new TranslationError();
+    if (!response.ok) {
+      // Do not read error bodies; cancellation failures may also contain secrets.
+      try { await response.body?.cancel(); } catch { /* Best-effort cleanup only. */ }
+      throw new TranslationError();
+    }
+    if (!response.body) throw new TranslationError();
 
     const reader = response.body.getReader();
     const chunks: Uint8Array[] = [];

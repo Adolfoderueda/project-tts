@@ -8,6 +8,7 @@ import { EventStore } from '../src/store.js';
 import type { CapturedEvent } from '../src/events.js';
 import type { ProjectConfig } from '../src/config.js';
 import { LineTerminalPrompt } from '../src/reply.js';
+import { OllamaTranslator, TranslationError } from '../src/translation-client.js';
 
 const alphaDirectory = join(tmpdir(), 'project-voice-bridge-projects', 'alpha');
 const bravoDirectory = join(tmpdir(), 'project-voice-bridge-projects', 'bravo');
@@ -30,6 +31,54 @@ function captureWritable() {
 }
 
 describe('cli', () => {
+  test.each(['PRIVATE_TEXT Bearer secret-token `unclosed', 'PRIVATE_TEXT\n```sh\nBearer secret-token'])('bilingual reply guides correction of malformed literals without sending: %j', async text => {
+    const c = await bilingualCli({ language: 'en' });
+    const fetchClient = vi.fn<typeof fetch>();
+    c.createTranslator.mockReturnValue(new OllamaTranslator({ model: 'gemma4:e2b', digest: 'a'.repeat(64) }, fetchClient));
+    c.transcribe.mockResolvedValueOnce(text);
+    const run = c.run();
+    await waitForOutput(c.stdout, 'Enter replacement');
+    c.input.write('\n');
+    expect(await run).toBe(1);
+    expect(c.stderr.output()).toMatch(/correct.*backtick.*try again/i);
+    expect(c.stderr.output()).not.toMatch(/PRIVATE_TEXT|Bearer|secret-token/);
+    expect(fetchClient).not.toHaveBeenCalled();
+    expect(c.send).not.toHaveBeenCalled();
+    expect(c.close).toHaveBeenCalledOnce();
+    expect(c.input.listenerCount('keypress')).toBe(0);
+  });
+
+  test.each([
+    ['literals', /correct.*backtick/i], ['invalidText', /nonempty.*2,000/i],
+    ['model', /model.*digest/i], ['response', /local runtime/i],
+  ] as const)('bilingual reply maps trusted %s category, not modified error text', async (reason, guidance) => {
+    const c = await bilingualCli({ language: 'en' });
+    const error = new TranslationError(reason);
+    error.message = 'PRIVATE_TEXT Bearer secret-token';
+    c.translate.mockRejectedValueOnce(error);
+    const run = c.run();
+    await waitForOutput(c.stdout, 'Enter replacement');
+    c.input.write('\n');
+    expect(await run).toBe(1);
+    expect(c.stderr.output()).toMatch(guidance);
+    expect(c.stderr.output()).not.toMatch(/PRIVATE_TEXT|Bearer|secret-token/);
+    expect(c.send).not.toHaveBeenCalled();
+    expect(c.close).toHaveBeenCalledOnce();
+  });
+
+  test.each([false, true])('bilingual reply does not trust forged translation errors (prototype: %s)', async forgePrototype => {
+    const c = await bilingualCli({ language: 'en' });
+    const error = Object.assign(new Error('PRIVATE_TEXT Bearer secret-token'), { name: 'TranslationError', reason: 'literals' });
+    if (forgePrototype) Object.setPrototypeOf(error, TranslationError.prototype);
+    c.translate.mockRejectedValueOnce(error);
+    const run = c.run();
+    await waitForOutput(c.stdout, 'Enter replacement');
+    c.input.write('\n');
+    expect(await run).toBe(1);
+    expect(c.stderr.output()).toContain('Reply failed.');
+    expect(c.stderr.output()).not.toMatch(/PRIVATE_TEXT|Bearer|secret-token|backtick/);
+    expect(c.send).not.toHaveBeenCalled();
+  });
   test.each(['en', 'es'] as const)('bilingual reply honors %s override and sends exact final text once', async language => {
     const c = await bilingualCli({ language: language === 'en' ? 'es' : 'en' });
     const run = c.run(['--chat-language', language]);
@@ -570,7 +619,7 @@ async function bilingualCli(options: { language?: 'en' | 'es'; legacy?: boolean;
   const transcribe = vi.fn(async () => 'texto original');
   const translate = vi.fn(async () => { if (options.failTranslation) throw new Error('PRIVATE_TEXT Bearer secret-token'); return 'reviewed text'; });
   const send = vi.fn(async () => undefined);
-  const createTranslator = vi.fn(() => ({ translate }));
+  const createTranslator = vi.fn<NonNullable<CliDependencies['createTranslator']>>(() => ({ translate }));
   const dependencies: CliDependencies = {
     createStore: path => { const store = new EventStore(path); return { get: store.get.bind(store), close: () => { close(); store.close(); if (options.failClose) throw new Error('PRIVATE_TEXT Bearer secret-token'); } } as EventStore; },
     createVoice: () => { throw new Error('not used'); },

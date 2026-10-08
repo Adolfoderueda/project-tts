@@ -3,7 +3,7 @@ import { loadConfig, type ChatLanguage } from './config.js';
 import { resolveChatLanguage } from './chat-language.js';
 import { selectEvent } from './event-selection.js';
 import { OpenCodeResponses } from './opencode-responses.js';
-import { OllamaTranslator } from './translation-client.js';
+import { OllamaTranslator, translationDiagnostic } from './translation-client.js';
 import { speakResponse } from './response-speech.js';
 import type { EventStore } from './store.js';
 import { formatReviewText } from './voice-text.js';
@@ -89,8 +89,8 @@ export async function runSpeakResponse(args: string[], io: CliIo, deps: CliDepen
       });
     io.stdout.write(`WAV written to ${formatReviewText(flags.get('--output')!)}; playback is manual.\n`);
     return 0;
-  } catch {
-    io.stderr.write('Response speech failed. Check bilingual configuration/chat language, the selected event/message, verified session, new WAV path, and local voice/translation services.\n');
+  } catch (error) {
+    io.stderr.write(`${translationDiagnostic(error) ?? 'Response speech failed. Check bilingual configuration/chat language, the selected event/message, verified session, new WAV path, and local voice/translation services.'}\n`);
     return 1;
   } finally {
     try {

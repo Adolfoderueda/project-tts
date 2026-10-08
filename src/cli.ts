@@ -9,7 +9,7 @@ import { speakEvent } from './speak.js';
 import { OpenCodeReply } from './opencode-reply.js';
 import { LineTerminalPrompt, replyToEvent } from './reply.js';
 import { OpenCodeResponses } from './opencode-responses.js';
-import { OllamaTranslator, type Translator } from './translation-client.js';
+import { OllamaTranslator, translationDiagnostic, type Translator } from './translation-client.js';
 import { runResponses, runSpeakResponse } from './cli-responses.js';
 import { replyBilingualToEvent } from './bilingual-reply.js';
 import { resolveChatLanguage } from './chat-language.js';
@@ -247,7 +247,7 @@ async function runReply(args: string[], io: CliIo, dependencies: CliDependencies
   } catch (error) {
     // Do not echo transport exceptions: they may include authentication headers or transcripts.
     const diagnostic = bilingual && error instanceof Error && error.message === 'Chat language is required: set project chatLanguage or supply --chat-language en|es.'
-      ? error.message : safeReplyDiagnostic(error);
+      ? error.message : (bilingual ? translationDiagnostic(error) : undefined) ?? safeReplyDiagnostic(error);
     io.stderr.write(`${diagnostic}\n`);
     return 1;
   } finally {
